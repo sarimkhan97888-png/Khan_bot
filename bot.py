@@ -39,7 +39,7 @@ def get_ai_reply(user_text):
     print(f"GROQ KEY EXISTS: {bool(GROQ_API_KEY)}")
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "messages": [
             {"role": "system", "content": "Tum ek majedar, comedy karne wale dost ho. Hinglish mein, thoda masti aur witty andaz mein short jawab do (2-3 lines se zyada nahi)."},
             {"role": "user", "content": user_text}
