@@ -13,6 +13,7 @@ TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
+    print(f"MESSAGE AAYA: {data}")
 
     if 'message' in data and 'text' in data['message']:
         chat_id = data['message']['chat']['id']
@@ -35,6 +36,7 @@ def webhook():
     return {"ok": True}
 
 def get_ai_reply(user_text):
+    print(f"GROQ KEY EXISTS: {bool(GROQ_API_KEY)}")
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
     payload = {
         "model": "llama-3.3-70b-versatile",
@@ -45,12 +47,16 @@ def get_ai_reply(user_text):
     }
     try:
         res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=15)
+        print(f"GROQ STATUS: {res.status_code}")
+        print(f"GROQ RESPONSE: {res.text}")
         return res.json()["choices"][0]["message"]["content"]
     except Exception as e:
+        print(f"ERROR HUA: {e}")
         return "Arre yaar, dimaag thoda hang ho gaya 😅 dobara try karo!"
 
 def send_message(chat_id, text):
-    requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
+    r = requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
+    print(f"TELEGRAM SEND STATUS: {r.status_code}")
 
 @app.route('/')
 def home():
