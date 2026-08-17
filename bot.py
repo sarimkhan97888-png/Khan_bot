@@ -11,10 +11,9 @@ BOT_USERNAME = "Khan_masti_bot"
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Har user ki history: {user_id: [{"role":..., "content":..., "time":...}, ...]}
 chat_memory = {}
-HISTORY_HOURS = 24  # kitne ghante tak yaad rakhna hai
-MAX_MESSAGES_PER_USER = 40  # safety limit, taaki ek user zyada spam na kar sake
+HISTORY_HOURS = 24
+MAX_MESSAGES_PER_USER = 40
 
 SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah — na ki AI bot ki tarah.
 
@@ -36,7 +35,6 @@ def mentions_khan(text):
     return "khan" in text.lower()
 
 def get_user_history(user_id):
-    """User ki history nikalo, 24 ghante se purani entries hata ke"""
     history = chat_memory.get(user_id, [])
     cutoff = time.time() - (HISTORY_HOURS * 3600)
     fresh_history = [msg for msg in history if msg["time"] > cutoff]
@@ -51,6 +49,7 @@ def webhook():
     if 'message' in data and 'text' in data['message']:
         chat_id = data['message']['chat']['id']
         user_id = data['message']['from']['id']
+        message_id = data['message']['message_id']
         text = data['message']['text']
 
         is_reply_to_bot = data['message'].get('reply_to_message', {}).get('from', {}).get('username') == BOT_USERNAME
@@ -64,14 +63,13 @@ def webhook():
         if should_reply:
             user_text = text.replace(f"@{BOT_USERNAME}", "").strip()
             reply = get_ai_reply(user_id, user_text)
-            send_message(chat_id, reply)
+            send_message(chat_id, reply, reply_to=message_id)
 
     return {"ok": True}
 
 def get_ai_reply(user_id, user_text):
     history = get_user_history(user_id)
 
-    # AI ko bhejne ke liye sirf role+content chahiye, time nahi
     messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages_for_ai += [{"role": h["role"], "content": h["content"]} for h in history]
     messages_for_ai.append({"role": "user", "content": user_text})
@@ -89,8 +87,6 @@ def get_ai_reply(user_id, user_text):
         now = time.time()
         history.append({"role": "user", "content": user_text, "time": now})
         history.append({"role": "assistant", "content": reply_text, "time": now})
-
-        # Safety: bahut zyada messages ho jayein to purane hata do
         chat_memory[user_id] = history[-MAX_MESSAGES_PER_USER:]
 
         return reply_text
@@ -98,8 +94,11 @@ def get_ai_reply(user_id, user_text):
         print(f"ERROR HUA: {e}")
         return "Arre yaar, dimaag thoda hang ho gaya 😅 dobara try karo!"
 
-def send_message(chat_id, text):
-    r = requests.post(f"{TELEGRAM_URL}/sendMessage", json={"chat_id": chat_id, "text": text})
+def send_message(chat_id, text, reply_to=None):
+    payload = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        payload["reply_to_message_id"] = reply_to
+    r = requests.post(f"{TELEGRAM_URL}/sendMessage", json=payload)
     print(f"TELEGRAM SEND STATUS: {r.status_code}")
 
 @app.route('/')
