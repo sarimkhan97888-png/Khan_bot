@@ -1,6 +1,7 @@
 from flask import Flask, request
 import requests
 import os
+import time
 
 app = Flask(__name__)
 
@@ -10,19 +11,21 @@ BOT_USERNAME = "Khan_masti_bot"
 
 TELEGRAM_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Har user ki chat history yaad rakhne ke liye (memory mein, jab tak bot chalta rahe)
+# Har user ki history: {user_id: [{"role":..., "content":..., "time":...}, ...]}
 chat_memory = {}
-MAX_HISTORY = 6
+HISTORY_HOURS = 24  # kitne ghante tak yaad rakhna hai
+MAX_MESSAGES_PER_USER = 40  # safety limit, taaki ek user zyada spam na kar sake
 
-SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah.
+SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah — na ki AI bot ki tarah.
 
 Zaroori niyam:
-- Jaisa message tumhe mile, waisa hi mood rakho. Agar koi sad hai, udaas hai, ya dukhi baat share kar raha hai — tum bhi soft, caring aur sad tone mein baat karo. Comedy mat karo jab koi pareshan ho.
-- Agar koi normal/casual baat kare to relaxed, chill tone mein reply do.
-- Agar koi masti/majaak kare, tab thoda comedy aur witty andaz use karo.
-- Agar koi bole "chup raho" ya gussa dikhaye, to thoda hurt/sad ho jao, jaise ek dost hota hai.
-- Hamesha Hinglish mein, BAHUT CHHOTE replies do — jyada se jyada 1 line, jaise real casual chat karte hain (jaise "hm bhai kaise ho", "are yaar yaad kiya", "kya hua bata"). Lambe paragraph kabhi mat likho.
-- Har message pe ek jaisa reply mat do — thoda variation rakho, jaise insaan alag-alag tareeke se bolta hai."""
+- Reply ki length us baat pe depend kare, jaise real insaan karte hain:
+  - Agar saamne wale ne chhoti baat ki ("hi", "kya kar raha", "ok") to tum bhi chhota casual reply do (1 line).
+  - Agar saamne wale ne lambi ya interesting baat ki, kuch share kiya, kahani sunayi, ya masti wali baat ki — tab tum bhi thoda khul ke, do-teen lines mein, maze lete hue reply do. Jokes maaro, taane maaro (pyaar se), witty bano.
+  - Agar koi sad/pareshan baat share kare — tab comedy chhod do, soft aur caring tone mein baat karo, chahe reply chhota ho ya thoda lamba.
+- Mood ka dhyan rakho: casual mein casual, masti mein masti, sad mein sad, gussa dikhaye to thoda hurt ho jao.
+- Hamesha Hinglish mein, natural andaz mein — jaise dost WhatsApp/Telegram pe baat karte hain, kabhi robotic ya formal mat lagna.
+- Emojis ka use thoda kam aur situation ke hisaab se karo, har message mein zabardasti mat daalo."""
 
 def is_greeting(text):
     words = text.lower().strip().split()
@@ -31,6 +34,14 @@ def is_greeting(text):
 
 def mentions_khan(text):
     return "khan" in text.lower()
+
+def get_user_history(user_id):
+    """User ki history nikalo, 24 ghante se purani entries hata ke"""
+    history = chat_memory.get(user_id, [])
+    cutoff = time.time() - (HISTORY_HOURS * 3600)
+    fresh_history = [msg for msg in history if msg["time"] > cutoff]
+    chat_memory[user_id] = fresh_history
+    return fresh_history
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -52,36 +63,35 @@ def webhook():
 
         if should_reply:
             user_text = text.replace(f"@{BOT_USERNAME}", "").strip()
-
-            if greeting:
-                prompt_hint = f"Kisi ne tumhe '{user_text}' bola hai — casual, chhota, dost jaisa greeting reply do."
-            elif khan_called:
-                prompt_hint = f"Kisi ne group mein tumhara naam 'Khan' liya hai, poora message: '{user_text}' — chhota casual reply do jaise 'hm bhai yaad kiya kya' ya 'kya hua bata' type."
-            else:
-                prompt_hint = user_text
-
-            reply = get_ai_reply(user_id, prompt_hint)
+            reply = get_ai_reply(user_id, user_text)
             send_message(chat_id, reply)
 
     return {"ok": True}
 
 def get_ai_reply(user_id, user_text):
-    history = chat_memory.get(user_id, [])
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [{"role": "user", "content": user_text}]
+    history = get_user_history(user_id)
+
+    # AI ko bhejne ke liye sirf role+content chahiye, time nahi
+    messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages_for_ai += [{"role": h["role"], "content": h["content"]} for h in history]
+    messages_for_ai.append({"role": "user", "content": user_text})
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
     payload = {
         "model": "openai/gpt-oss-120b",
-        "messages": messages
+        "messages": messages_for_ai
     }
     try:
         res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=15)
         print(f"GROQ STATUS: {res.status_code}")
         reply_text = res.json()["choices"][0]["message"]["content"]
 
-        history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": reply_text})
-        chat_memory[user_id] = history[-MAX_HISTORY:]
+        now = time.time()
+        history.append({"role": "user", "content": user_text, "time": now})
+        history.append({"role": "assistant", "content": reply_text, "time": now})
+
+        # Safety: bahut zyada messages ho jayein to purane hata do
+        chat_memory[user_id] = history[-MAX_MESSAGES_PER_USER:]
 
         return reply_text
     except Exception as e:
