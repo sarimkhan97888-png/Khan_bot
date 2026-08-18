@@ -37,16 +37,10 @@ HELP_TEXT = """🤖 *Khan Bot Commands*
 - Mujhe tag karo, reply karo, ya naam "khan" liyo
 
 *Admin Commands (reply karke likho):*
-/khanban - Permanent ban
-/khankick - Nikaalo (dobara join ho sakta)
-/khanunban - Ban hataao
-/khanmute - Chup karao
-/khanunmute - Wapas bolne do
-/khanwarn - Warning do (3 = auto ban)
-/khanpin - Message pin karo
-/khanreport - Kisi ki shikayat owner ko bhejo
+/ban /kick /unban /mute /unmute /warn /pin
+/report - Kisi ki shikayat owner ko bhejo
 
-/khanhelp - Ye list dobara dikhao"""
+/help - Ye list dobara dikhao"""
 
 def is_greeting(text):
     words = text.lower().strip().split()
@@ -78,7 +72,7 @@ def webhook():
     chat_id = message['chat']['id']
 
     if message['chat']['type'] == 'private' and message.get('text') == '/start':
-        send_message(chat_id, "Ho gaya connect! Ab tumhe reports aur alerts yahin milenge. ✅")
+        send_message(chat_id, f"Ho gaya connect! Tumhara ID hai: {message['from']['id']}\nAb tumhe reports yahin milenge. ✅")
         return {"ok": True}
 
     if 'new_chat_members' in message:
@@ -94,25 +88,30 @@ def webhook():
     user_id = message['from']['id']
     message_id = message['message_id']
 
-    # ---- Agar ye user report ka reason likhne wala tha ----
+    print(f"WAITING LIST ABHI: {waiting_for_reason}")
+    print(f"YE USER ID HAI: {user_id}")
+
+    # ---- Sabse pehle check: kya ye banda reason likhne wala tha? ----
     if user_id in waiting_for_reason:
+        print("REASON MIL GAYA, PROCESS KAR RAHA HOON")
         finish_report(user_id, text)
         return {"ok": True}
 
     cmd = text.strip().split()[0].lower()
 
     commands = {
-        '/khanhelp': lambda: send_message(chat_id, HELP_TEXT),
-        '/khanban': lambda: handle_ban(chat_id, message),
-        '/khankick': lambda: handle_kick(chat_id, message),
-        '/khanunban': lambda: handle_unban(chat_id, message),
-        '/khanmute': lambda: handle_mute(chat_id, message),
-        '/khanunmute': lambda: handle_unmute(chat_id, message),
-        '/khanwarn': lambda: handle_warn(chat_id, message),
-        '/khanpin': lambda: handle_pin(chat_id, message),
-        '/khanreport': lambda: start_report(chat_id, message),
+        '/help': lambda: send_message(chat_id, HELP_TEXT),
+        '/ban': lambda: handle_ban(chat_id, message),
+        '/kick': lambda: handle_kick(chat_id, message),
+        '/unban': lambda: handle_unban(chat_id, message),
+        '/mute': lambda: handle_mute(chat_id, message),
+        '/unmute': lambda: handle_unmute(chat_id, message),
+        '/warn': lambda: handle_warn(chat_id, message),
+        '/pin': lambda: handle_pin(chat_id, message),
+        '/report': lambda: start_report(chat_id, message),
     }
     if cmd in commands:
+        print(f"COMMAND MILA: {cmd}")
         commands[cmd]()
         return {"ok": True}
 
@@ -136,7 +135,7 @@ def webhook():
 def start_report(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai jisko report karna hai, uske message pe reply karke /khanreport likho!")
+        send_message(chat_id, "Bhai jisko report karna hai, uske message pe reply karke /report likho!")
         return
 
     reporter = message['from']
@@ -148,6 +147,7 @@ def start_report(chat_id, message):
         "target_name": target.get('first_name', 'is bande'),
         "reporter_name": reporter.get('first_name', 'Kisi ne')
     }
+    print(f"REPORT SHURU: reporter_id={reporter_id}, data={waiting_for_reason[reporter_id]}")
 
     send_message(
         chat_id,
@@ -161,8 +161,10 @@ def finish_report(reporter_id, reason_text):
     target_name = report_data["target_name"]
     reporter_name = report_data["reporter_name"]
 
+    print(f"OWNER_ID VALUE: {OWNER_ID}")
+
     if not OWNER_ID:
-        send_message(chat_id, "Owner ID set nahi hai abhi, report nahi bhej saka.")
+        send_message(chat_id, "⚠️ Owner ID set nahi hai, report nahi bhej saka. Owner ko bolna OWNER_ID environment variable set kare.")
         return
 
     report_id = str(int(time.time() * 1000))
@@ -174,10 +176,10 @@ def finish_report(reporter_id, reason_text):
     }
 
     text_to_owner = (
-        f"🚨 *Nayi Report*\n\n"
-        f"👤 Report kiya: {reporter_name}\n"
-        f"🎯 Report hua: {target_name}\n"
-        f"📝 Reason: {reason_text}\n\n"
+        f"🚨 Nayi Report\n\n"
+        f"Report kiya: {reporter_name}\n"
+        f"Report hua: {target_name}\n"
+        f"Reason: {reason_text}\n\n"
         f"Kya karna hai?"
     )
 
@@ -191,12 +193,12 @@ def finish_report(reporter_id, reason_text):
         ]]
     }
 
-    requests.post(f"{TELEGRAM_URL}/sendMessage", json={
+    r = requests.post(f"{TELEGRAM_URL}/sendMessage", json={
         "chat_id": OWNER_ID,
         "text": text_to_owner,
-        "parse_mode": "Markdown",
         "reply_markup": keyboard
     })
+    print(f"OWNER KO DM SEND STATUS: {r.status_code}, RESPONSE: {r.text}")
 
     send_message(chat_id, "Report reason ke saath bhej di gayi hai, owner dekh lenge. 👍")
 
@@ -257,7 +259,7 @@ def get_target_user(message):
 def handle_ban(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai kisi ke message pe reply karke /khanban likho!")
+        send_message(chat_id, "Bhai kisi ke message pe reply karke /ban likho!")
         return
     requests.post(f"{TELEGRAM_URL}/banChatMember", json={"chat_id": chat_id, "user_id": target['id']})
     send_message(chat_id, f"{target.get('first_name','ye banda')} ko bahar ka rasta dikha diya gaya hai 🚪👋")
@@ -265,7 +267,7 @@ def handle_ban(chat_id, message):
 def handle_kick(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai kisi ke message pe reply karke /khankick likho!")
+        send_message(chat_id, "Bhai kisi ke message pe reply karke /kick likho!")
         return
     requests.post(f"{TELEGRAM_URL}/banChatMember", json={"chat_id": chat_id, "user_id": target['id']})
     requests.post(f"{TELEGRAM_URL}/unbanChatMember", json={"chat_id": chat_id, "user_id": target['id']})
@@ -274,7 +276,7 @@ def handle_kick(chat_id, message):
 def handle_unban(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai kisi ke message pe reply karke /khanunban likho!")
+        send_message(chat_id, "Bhai kisi ke message pe reply karke /unban likho!")
         return
     requests.post(f"{TELEGRAM_URL}/unbanChatMember", json={"chat_id": chat_id, "user_id": target['id'], "only_if_banned": True})
     send_message(chat_id, f"{target.get('first_name','ye banda')} ka ban hata diya ✅")
@@ -282,7 +284,7 @@ def handle_unban(chat_id, message):
 def handle_mute(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai kisi ke message pe reply karke /khanmute likho!")
+        send_message(chat_id, "Bhai kisi ke message pe reply karke /mute likho!")
         return
     requests.post(f"{TELEGRAM_URL}/restrictChatMember", json={
         "chat_id": chat_id, "user_id": target['id'],
@@ -293,7 +295,7 @@ def handle_mute(chat_id, message):
 def handle_unmute(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai kisi ke message pe reply karke /khanunmute likho!")
+        send_message(chat_id, "Bhai kisi ke message pe reply karke /unmute likho!")
         return
     requests.post(f"{TELEGRAM_URL}/restrictChatMember", json={
         "chat_id": chat_id, "user_id": target['id'],
@@ -307,7 +309,7 @@ def handle_unmute(chat_id, message):
 def handle_warn(chat_id, message):
     target = get_target_user(message)
     if not target:
-        send_message(chat_id, "Bhai kisi ke message pe reply karke /khanwarn likho!")
+        send_message(chat_id, "Bhai kisi ke message pe reply karke /warn likho!")
         return
     chat_warns = warnings.setdefault(chat_id, {})
     count = chat_warns.get(target['id'], 0) + 1
@@ -324,7 +326,7 @@ def handle_warn(chat_id, message):
 def handle_pin(chat_id, message):
     reply_msg = message.get('reply_to_message')
     if not reply_msg:
-        send_message(chat_id, "Bhai jis message ko pin karna hai, uspe reply karke /khanpin likho!")
+        send_message(chat_id, "Bhai jis message ko pin karna hai, uspe reply karke /pin likho!")
         return
     requests.post(f"{TELEGRAM_URL}/pinChatMessage", json={"chat_id": chat_id, "message_id": reply_msg['message_id']})
     send_message(chat_id, "📌 Pin kar diya!")
@@ -354,11 +356,11 @@ def get_ai_reply(user_id, user_text):
         return "Arre yaar, dimaag thoda hang ho gaya 😅 dobara try karo!"
 
 def send_message(chat_id, text, reply_to=None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": text}
     if reply_to:
         payload["reply_to_message_id"] = reply_to
     r = requests.post(f"{TELEGRAM_URL}/sendMessage", json=payload)
-    print(f"TELEGRAM SEND STATUS: {r.status_code}")
+    print(f"TELEGRAM SEND STATUS: {r.status_code}, RESPONSE: {r.text}")
 
 @app.route('/')
 def home():
