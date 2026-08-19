@@ -120,6 +120,7 @@ def handle_message(message):
     user_id = message.get('from', {}).get('id')
     message_id = message.get('message_id')
 
+    # ================= PRIVATE (OWNER PANEL) =================
     if chat_type == 'private':
         if text == '/start':
             msg = "Connected! Tumhara ID: " + str(user_id) + "\n/panel likho group control karne ke liye."
@@ -154,6 +155,7 @@ def handle_message(message):
                 return
         return
 
+    # ================= GROUP CHAT =================
     if not text:
         return
 
@@ -275,6 +277,8 @@ def safe_check_admin(chat_id, user_id):
         return False
 
 
+# ==================== REPORT ====================
+
 def start_report(chat_id, message):
     target = get_target_user(message)
     if not target:
@@ -330,6 +334,8 @@ def finish_report(reporter_id, reason_text):
         print("OWNER DM ERROR: " + str(e))
     send_message(chat_id, "Report bhej di gayi hai.")
 
+
+# ==================== OWNER CONTROL PANEL ====================
 
 def show_panel_groups(chat_id):
     if not known_chats:
@@ -402,6 +408,8 @@ def handle_panel_user_input(message):
     ]]
     send_message_with_keyboard(reply_chat, target_name + " pe kya action lena hai?", {"inline_keyboard": buttons})
 
+
+# ==================== CALLBACKS ====================
 
 def handle_callback(callback):
     data_str = callback.get('data', '')
@@ -508,6 +516,8 @@ def answer_callback(callback_id, text):
     requests.post(TELEGRAM_URL + "/answerCallbackQuery", json={"callback_query_id": callback_id, "text": text}, timeout=10)
 
 
+# ==================== ADMIN COMMANDS (GROUP SE) ====================
+
 def get_target_user(message):
     reply_msg = message.get('reply_to_message')
     if not reply_msg:
@@ -536,4 +546,93 @@ def handle_unban(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /unban likho!")
         return
-    
+    requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target['id'], "only_if_banned": True}, timeout=10)
+    send_message(chat_id, get_name(target) + " ka ban hata diya.")
+
+
+def handle_mute(chat_id, message):
+    target = get_target_user(message)
+    if not target:
+        send_message(chat_id, "Kisi ke message pe reply karke /mute likho!")
+        return
+    send_message(chat_id, do_moderation_action("mute", chat_id, target['id'], get_name(target)))
+
+
+def handle_unmute(chat_id, message):
+    target = get_target_user(message)
+    if not target:
+        send_message(chat_id, "Kisi ke message pe reply karke /unmute likho!")
+        return
+    send_message(chat_id, do_moderation_action("unmute", chat_id, target['id'], get_name(target)))
+
+
+def handle_warn(chat_id, message):
+    target = get_target_user(message)
+    if not target:
+        send_message(chat_id, "Kisi ke message pe reply karke /warn likho!")
+        return
+    send_message(chat_id, do_moderation_action("warn", chat_id, target['id'], get_name(target)))
+
+
+def handle_pin(chat_id, message):
+    reply_msg = message.get('reply_to_message')
+    if not reply_msg:
+        send_message(chat_id, "Jis message ko pin karna hai, uspe reply karke /pin likho!")
+        return
+    requests.post(TELEGRAM_URL + "/pinChatMessage", json={"chat_id": chat_id, "message_id": reply_msg['message_id']}, timeout=10)
+    send_message(chat_id, "Pin kar diya!")
+
+
+# ==================== AI REPLY ====================
+
+def get_ai_reply(user_id, user_text):
+    try:
+        history = get_user_history(user_id)
+        messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
+        for h in history:
+            messages_for_ai.append({"role": h["role"], "content": h["content"]})
+        messages_for_ai.append({"role": "user", "content": user_text})
+
+        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
+        payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai}
+        res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=15)
+        reply_text = res.json()["choices"][0]["message"]["content"]
+
+        now = time.time()
+        history.append({"role": "user", "content": user_text, "time": now})
+        history.append({"role": "assistant", "content": reply_text, "time": now})
+        chat_memory[user_id] = history[-MAX_MESSAGES_PER_USER:]
+
+        return reply_text
+    except Exception as e:
+        print("AI ERROR: " + str(e))
+        return "Arre yaar, dimaag hang ho gaya"
+
+
+def send_message(chat_id, text, reply_to=None):
+    try:
+        payload = {"chat_id": chat_id, "text": text}
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+        r = requests.post(TELEGRAM_URL + "/sendMessage", json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        print("SEND ERROR: " + str(e))
+        return None
+
+
+def send_message_with_keyboard(chat_id, text, keyboard):
+    try:
+        requests.post(TELEGRAM_URL + "/sendMessage", json={"chat_id": chat_id, "text": text, "reply_markup": keyboard}, timeout=10)
+    except Exception as e:
+        print("SEND KEYBOARD ERROR: " + str(e))
+
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
