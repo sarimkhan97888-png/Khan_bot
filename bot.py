@@ -37,15 +37,36 @@ Zaroori niyam:
 - Koi insult kare to thoda attitude dikhao, taana maaro - bina gaali ke.
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna."""
 
-DEFAULT_WELCOME = "Are wah, {name} aa gaye! Group mein swagat hai, masti karo aur rules follow karna bhai!"
+DEFAULT_WELCOME = "Welcome to PROFITIX Community, {name}! Yahan trading tips aur achhi vibes milegi, maza karo aur active raho!"
 LINK_PATTERN = re.compile(r'(https?://|www\.|t\.me/|telegram\.me/)', re.IGNORECASE)
 
+DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
+DM_DISCLAIMER = "DM mein hone wale kisi bhi spam/scam ki zimmedari group ya admin ki nahi hogi, khud dhyan rakhna bhai."
 
-def is_greeting(text):
-    words = text.lower().strip().split()
-    greet_list = ["hi", "hello", "hii", "hey", "helo", "hlo"]
-    for w in words:
-        if w in greet_list:
+BAD_WORDS = set([
+    "chutiya", "chutia", "chutiye", "chutiyapa",
+    "madarchod", "mc", "behenchod", "bhenchod", "bc",
+    "bhosdike", "bhosdi", "bhosda",
+    "gandu", "gaandu", "gaand",
+    "lund", "lauda", "laude", "loda", "lode",
+    "randi", "raand",
+    "chodu", "chod", "chudai",
+    "bsdk", "bkl",
+    "fuck", "fucker", "fucking", "motherfucker",
+    "bitch", "asshole", "bastard", "slut", "whore", "cunt", "dick", "pussy"
+])
+
+def mentions_khan(text):
+    cleaned = re.sub(r'[^a-zA-Z\s]', ' ', text.lower())
+    tokens = cleaned.split()
+    return "khan" in tokens
+
+
+def contains_bad_word(text):
+    cleaned = re.sub(r'[^a-zA-Z\s]', '', text.lower())
+    tokens = cleaned.split()
+    for t in tokens:
+        if t in BAD_WORDS:
             return True
     return False
 
@@ -82,6 +103,12 @@ def get_name(user_dict):
     if not name:
         return "ye banda"
     return name
+
+
+def is_owner(user_id):
+    if not OWNER_ID:
+        return False
+    return str(user_id) == str(OWNER_ID)
 
 
 @app.route('/webhook', methods=['POST'])
@@ -142,7 +169,8 @@ def handle_message(message):
                 return
             if stage == 'await_broadcast':
                 target_chat = state['chat_id']
-                safe_run(send_message, target_chat, text)
+                broadcast_text = "📢 NOTICE BY OWNER 📢\n➖➖➖➖➖➖➖➖➖➖➖\n\n" + text + "\n\n➖➖➖➖➖➖➖➖➖➖➖"
+                safe_run(send_message, target_chat, broadcast_text)
                 safe_run(send_message, chat_id, "Broadcast bhej diya gaya group mein.")
                 panel_state.pop(user_id, None)
                 return
@@ -183,6 +211,17 @@ def handle_message(message):
             except Exception as e:
                 print("LINK DELETE ERROR: " + str(e))
             return
+
+    # ---- Gaali filter (owner exempt) ----
+    if not is_owner(user_id) and contains_bad_word(text):
+        name = get_name(message.get('from', {}))
+        safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
+        return
+
+    # ---- DM spam disclaimer ----
+    if DM_PATTERN.search(text):
+        safe_run(send_message, chat_id, DM_DISCLAIMER, message_id)
+        return
 
     reply_to = message.get('reply_to_message')
 
@@ -252,9 +291,8 @@ def handle_message(message):
         if from_user.get('username') == BOT_USERNAME:
             is_reply_to_bot = True
 
-    is_mentioned = ("@" + BOT_USERNAME) in text
-    greeting = is_greeting(text)
-    should_reply = is_mentioned or is_reply_to_bot or greeting
+    khan_called = mentions_khan(text)
+    should_reply = is_reply_to_bot or khan_called
 
     if should_reply:
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
@@ -416,6 +454,22 @@ def handle_callback(callback):
     owner_dm_chat_id = callback['message']['chat']['id']
     owner_id = callback['from']['id']
 
+    if data_str.startswith("modbtn:"):
+        parts = data_str.split(":")
+        subaction = parts[1]
+        m_chat_id = int(parts[2])
+        m_target_id = int(parts[3])
+        result_text = handle_modbtn(subaction, m_chat_id, m_target_id)
+        safe_run(answer_callback, callback['id'], "Done")
+        try:
+            requests.post(TELEGRAM_URL + "/editMessageText", json={
+                "chat_id": owner_dm_chat_id, "message_id": callback['message']['message_id'],
+                "text": result_text
+            }, timeout=10)
+        except Exception as e:
+            print("EDIT MODBTN ERROR: " + str(e))
+        return
+
     if data_str.startswith("panelgrp:"):
         gid = int(data_str.split(":")[1])
         safe_run(show_group_menu, owner_dm_chat_id, gid)
@@ -447,8 +501,9 @@ def handle_callback(callback):
         action = parts[1]
         gid = int(parts[2])
         target_id = int(parts[3])
-        result_msg = do_moderation_action(action, gid, target_id)
-        safe_run(send_message, owner_dm_chat_id, result_msg)
+        st = panel_state.get(owner_id, {})
+        target_name = st.get('target_name', 'ye banda')
+        safe_run(moderation_action_and_notify, action, gid, target_id, target_name, owner_dm_chat_id)
         safe_run(answer_callback, callback['id'], "Done")
         return
 
@@ -463,18 +518,36 @@ def handle_callback(callback):
     chat_id = report['chat_id']
     target_id = report['target_id']
     target_name = report['target_name']
-    group_msg = do_moderation_action(action, chat_id, target_id, target_name)
 
-    safe_run(send_message, chat_id, group_msg)
+    if action == "free":
+        group_msg = target_name + " pe koi action nahi liya gaya."
+        safe_run(send_message, chat_id, group_msg)
+    else:
+        safe_run(moderation_action_and_notify, action, chat_id, target_id, target_name, chat_id)
+
     safe_run(answer_callback, callback['id'], "Action ho gaya")
     try:
         requests.post(TELEGRAM_URL + "/editMessageText", json={
             "chat_id": owner_dm_chat_id, "message_id": callback['message']['message_id'],
-            "text": "Handled: " + group_msg
+            "text": "Handled report for " + target_name + " (action: " + action + ")"
         }, timeout=10)
     except Exception as e:
         print("EDIT ERROR: " + str(e))
     del pending_reports[report_id]
+
+
+def handle_modbtn(subaction, chat_id, target_id):
+    if subaction == "unban":
+        requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target_id, "only_if_banned": True}, timeout=10)
+        return "Unban kar diya gaya."
+    elif subaction == "unwarn":
+        chat_warns = warnings.setdefault(chat_id, {})
+        count = chat_warns.get(target_id, 0)
+        if count > 0:
+            count = count - 1
+        chat_warns[target_id] = count
+        return "Warning kam kar di gayi. Ab count: " + str(count) + "/3"
+    return "Kuch nahi hua."
 
 
 def do_moderation_action(action, chat_id, target_id, target_name=None):
@@ -482,23 +555,23 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
         target_name = "ye banda"
     if action == "ban":
         requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
-        return target_name + " ko ban kar diya gaya."
+        return (target_name + " ko ban kar diya gaya.", "ban")
     elif action == "kick":
         requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
         requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
-        return target_name + " ko nikaal diya gaya."
+        return (target_name + " ko nikaal diya gaya.", "kick")
     elif action == "mute":
         requests.post(TELEGRAM_URL + "/restrictChatMember", json={
             "chat_id": chat_id, "user_id": target_id, "permissions": {"can_send_messages": False}
         }, timeout=10)
-        return target_name + " ko mute kar diya gaya."
+        return (target_name + " ko mute kar diya gaya.", "mute")
     elif action == "unmute":
         requests.post(TELEGRAM_URL + "/restrictChatMember", json={
             "chat_id": chat_id, "user_id": target_id,
             "permissions": {"can_send_messages": True, "can_send_media_messages": True,
                              "can_send_other_messages": True, "can_add_web_page_previews": True}
         }, timeout=10)
-        return target_name + " wapas bol sakta hai."
+        return (target_name + " wapas bol sakta hai.", "unmute")
     elif action == "warn":
         chat_warns = warnings.setdefault(chat_id, {})
         count = chat_warns.get(target_id, 0) + 1
@@ -506,10 +579,24 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
         if count >= 3:
             requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
             chat_warns[target_id] = 0
-            return target_name + " ki 3 warning ho gayi, ban kar diya."
-        return target_name + " ko warning di gayi (" + str(count) + "/3)"
+            return (target_name + " ki 3 warning ho gayi, ban kar diya.", "ban")
+        return (target_name + " ko warning di gayi (" + str(count) + "/3)", "warn")
     else:
-        return target_name + " pe koi action nahi liya gaya."
+        return (target_name + " pe koi action nahi liya gaya.", "none")
+
+
+def moderation_action_and_notify(action, chat_id, target_id, target_name, notify_chat_id, reply_to=None):
+    text, state = do_moderation_action(action, chat_id, target_id, target_name)
+    keyboard = None
+    if state == "ban":
+        keyboard = {"inline_keyboard": [[{"text": "Unban", "callback_data": "modbtn:unban:" + str(chat_id) + ":" + str(target_id)}]]}
+    elif state == "warn":
+        keyboard = {"inline_keyboard": [[{"text": "Unwarn", "callback_data": "modbtn:unwarn:" + str(chat_id) + ":" + str(target_id)}]]}
+
+    if keyboard:
+        send_message_with_keyboard(notify_chat_id, text, keyboard, reply_to)
+    else:
+        send_message(notify_chat_id, text, reply_to)
 
 
 def answer_callback(callback_id, text):
@@ -530,7 +617,7 @@ def handle_ban(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /ban likho!")
         return
-    send_message(chat_id, do_moderation_action("ban", chat_id, target['id'], get_name(target)))
+    moderation_action_and_notify("ban", chat_id, target['id'], get_name(target), chat_id)
 
 
 def handle_kick(chat_id, message):
@@ -538,7 +625,7 @@ def handle_kick(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /kick likho!")
         return
-    send_message(chat_id, do_moderation_action("kick", chat_id, target['id'], get_name(target)))
+    moderation_action_and_notify("kick", chat_id, target['id'], get_name(target), chat_id)
 
 
 def handle_unban(chat_id, message):
@@ -555,7 +642,7 @@ def handle_mute(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /mute likho!")
         return
-    send_message(chat_id, do_moderation_action("mute", chat_id, target['id'], get_name(target)))
+    moderation_action_and_notify("mute", chat_id, target['id'], get_name(target), chat_id)
 
 
 def handle_unmute(chat_id, message):
@@ -563,7 +650,7 @@ def handle_unmute(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /unmute likho!")
         return
-    send_message(chat_id, do_moderation_action("unmute", chat_id, target['id'], get_name(target)))
+    moderation_action_and_notify("unmute", chat_id, target['id'], get_name(target), chat_id)
 
 
 def handle_warn(chat_id, message):
@@ -571,7 +658,7 @@ def handle_warn(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /warn likho!")
         return
-    send_message(chat_id, do_moderation_action("warn", chat_id, target['id'], get_name(target)))
+    moderation_action_and_notify("warn", chat_id, target['id'], get_name(target), chat_id)
 
 
 def handle_pin(chat_id, message):
@@ -621,9 +708,12 @@ def send_message(chat_id, text, reply_to=None):
         return None
 
 
-def send_message_with_keyboard(chat_id, text, keyboard):
+def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
     try:
-        requests.post(TELEGRAM_URL + "/sendMessage", json={"chat_id": chat_id, "text": text, "reply_markup": keyboard}, timeout=10)
+        payload = {"chat_id": chat_id, "text": text, "reply_markup": keyboard}
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+        requests.post(TELEGRAM_URL + "/sendMessage", json=payload, timeout=10)
     except Exception as e:
         print("SEND KEYBOARD ERROR: " + str(e))
 
