@@ -9,6 +9,7 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
 
@@ -729,6 +730,69 @@ def call_groq(payload, timeout=20, max_retries=1):
         return r, data
 
 
+def to_gemini_contents(messages):
+    """OpenAI-style messages list ko Gemini ke format mein convert karta hai."""
+    system_parts = []
+    contents = []
+    for m in messages:
+        if m["role"] == "system":
+            system_parts.append(m["content"])
+        elif m["role"] == "user":
+            contents.append({"role": "user", "parts": [{"text": m["content"]}]})
+        elif m["role"] == "assistant":
+            contents.append({"role": "model", "parts": [{"text": m["content"]}]})
+    return "\n".join(system_parts), contents
+
+
+def call_gemini(payload, timeout=20, max_retries=1):
+    """Gemini ko call karta hai. 429 aane pe thoda wait karke ek baar retry karta hai."""
+    if not GEMINI_API_KEY:
+        return None, {"error": {"message": "GEMINI_API_KEY set nahi hai"}}
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+    attempt = 0
+    while True:
+        r = requests.post(url, json=payload, headers=headers, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        if data.get("candidates"):
+            return r, data
+
+        err = data.get("error", {})
+        is_rate_limit = (r.status_code == 429) or (err.get("status") == "RESOURCE_EXHAUSTED")
+
+        if is_rate_limit and attempt < max_retries:
+            wait_time = 5.0
+            retry_after = r.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    wait_time = float(retry_after)
+                except Exception:
+                    pass
+            wait_time = min(wait_time + 0.5, 15.0)
+            print("GEMINI RATE LIMIT HIT, waiting " + str(round(wait_time, 1)) + "s then retrying")
+            time.sleep(wait_time)
+            attempt += 1
+            continue
+
+        return r, data
+
+
+def extract_gemini_text(data):
+    try:
+        candidates = data.get("candidates")
+        if not candidates:
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text or None
+    except Exception:
+        return None
+
+
 def needs_web_info(text):
     t = text.lower()
     if any(k in t for k in WEB_INFO_KEYWORDS):
@@ -739,7 +803,25 @@ def needs_web_info(text):
 
 
 def fetch_web_info(query):
-    """Sirf current/factual info nikalne ke liye halka compound-mini call - persona wala reply nahi, sirf raw fact."""
+    """Current/factual info nikalta hai. Pehle Gemini (Google Search) try karta hai,
+    agar wo rate-limit ya fail ho jaaye to Groq compound-mini backup ban jaata hai."""
+    # Pehli koshish: Gemini
+    try:
+        payload = {
+            "contents": [{"parts": [{"text": query}]}],
+            "tools": [{"google_search": {}}]
+        }
+        r, data = call_gemini(payload, timeout=20)
+        info = extract_gemini_text(data)
+        if info:
+            if len(info) > 600:
+                info = info[:600] + "..."
+            return info
+        print("GEMINI WEB INFO FAILED, trying Groq backup: " + str(data))
+    except Exception as e:
+        print("GEMINI WEB INFO EXCEPTION, trying Groq backup: " + str(e))
+
+    # Backup: Groq compound-mini
     try:
         payload = {
             "model": "groq/compound-mini",
@@ -748,14 +830,14 @@ def fetch_web_info(query):
         }
         r, data = call_groq(payload, timeout=20)
         if "choices" not in data:
-            print("WEB INFO FETCH ERROR (status " + str(r.status_code) + "): " + str(data))
+            print("GROQ WEB INFO BACKUP ALSO FAILED (status " + str(r.status_code) + "): " + str(data))
             return None
         info = data["choices"][0]["message"]["content"]
         if info and len(info) > 600:
             info = info[:600] + "..."
         return info
     except Exception as e:
-        print("WEB INFO FETCH EXCEPTION: " + str(e))
+        print("GROQ WEB INFO BACKUP EXCEPTION: " + str(e))
         return None
 
 
@@ -798,18 +880,30 @@ def get_ai_reply(user_id, user_text):
 
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
 
-        # normal chat hamesha plain model se, jaisa pehle tha - koi extra load nahi
+        # normal chat pehle Groq se, jaisa pehle tha
         payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai}
         res, res_json = call_groq(payload, timeout=20)
 
-        if "choices" not in res_json:
-            print("GROQ API ERROR RESPONSE (status " + str(res.status_code) + "): " + str(res_json))
-            err_code = res_json.get("error", {}).get("code", "")
-            if err_code == "rate_limit_exceeded" or res.status_code == 429:
-                return "Arre thoda ruk yaar, bahut load hai abhi. 1 min baad phir try karo."
-            return "Arre yaar, dimaag hang ho gaya"
+        reply_text = None
 
-        reply_text = res_json["choices"][0]["message"]["content"]
+        if "choices" in res_json:
+            reply_text = res_json["choices"][0]["message"]["content"]
+        else:
+            print("GROQ CHAT FAILED (status " + str(res.status_code) + "): " + str(res_json) + " -- trying Gemini backup")
+            # Backup: Gemini se persona reply
+            system_text, gemini_contents = to_gemini_contents(messages_for_ai)
+            gemini_payload = {"contents": gemini_contents}
+            if system_text:
+                gemini_payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+            _, gemini_data = call_gemini(gemini_payload, timeout=20)
+            reply_text = extract_gemini_text(gemini_data)
+
+            if not reply_text:
+                print("GEMINI BACKUP ALSO FAILED: " + str(gemini_data))
+                err_code = res_json.get("error", {}).get("code", "")
+                if err_code == "rate_limit_exceeded" or res.status_code == 429:
+                    return "Arre thoda ruk yaar, bahut load hai abhi. 1 min baad phir try karo."
+                return "Arre yaar, dimaag hang ho gaya"
 
         now = time.time()
         history.append({"role": "user", "content": user_text, "time": now})
