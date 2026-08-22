@@ -679,10 +679,22 @@ WEB_INFO_KEYWORDS = [
     "stock", "share market", "sensex", "nifty", "election", "budget"
 ]
 
+# General knowledge / info wale sawaal jaise "Jharkhand ke baare me jaante ho", "X kya hai", "X kaun tha"
+GENERAL_KNOWLEDGE_PATTERN = re.compile(
+    r'(ke\s*baare|ke\s*bare|jaante\s*ho|jante\s*ho|jaanti\s*ho|janti\s*ho|pata\s*hai\s*kya|'
+    r'kya\s*hai|kaun\s*(tha|thi|hai|hote)|kahan\s*hai|history\s*of|capital\s*of|'
+    r'ke\s*baare\s*mein|ke\s*bare\s*mein|batao\s*iske\s*baare|jankari\s*do|information\s*do)',
+    re.IGNORECASE
+)
+
 
 def needs_web_info(text):
     t = text.lower()
-    return any(k in t for k in WEB_INFO_KEYWORDS)
+    if any(k in t for k in WEB_INFO_KEYWORDS):
+        return True
+    if GENERAL_KNOWLEDGE_PATTERN.search(t):
+        return True
+    return False
 
 
 def fetch_web_info(query):
