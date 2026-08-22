@@ -683,7 +683,11 @@ def get_ai_reply(user_id, user_text):
         headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
         payload = {"model": "groq/compound", "messages": messages_for_ai}
         res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=30)
-        reply_text = res.json()["choices"][0]["message"]["content"]
+        res_json = res.json()
+        if "choices" not in res_json:
+            print("GROQ API ERROR RESPONSE (status " + str(res.status_code) + "): " + str(res_json))
+            return "Arre yaar, dimaag hang ho gaya"
+        reply_text = res_json["choices"][0]["message"]["content"]
 
         now = time.time()
         history.append({"role": "user", "content": user_text, "time": now})
