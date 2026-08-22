@@ -681,8 +681,8 @@ def get_ai_reply(user_id, user_text):
         messages_for_ai.append({"role": "user", "content": user_text})
 
         headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
-        payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai}
-        res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=15)
+        payload = {"model": "groq/compound", "messages": messages_for_ai}
+        res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=30)
         reply_text = res.json()["choices"][0]["message"]["content"]
 
         now = time.time()
