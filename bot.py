@@ -672,6 +672,42 @@ def handle_pin(chat_id, message):
 
 # ==================== AI REPLY ====================
 
+WEB_INFO_KEYWORDS = [
+    "aaj", "aj", "kal", "abhi", "current", "latest", "news", "khabar",
+    "score", "match", "result", "price", "rate", "kaun jeeta", "kisne jeeta",
+    "kya hua", "weather", "mausam", "today", "yesterday", "date", "tareekh",
+    "stock", "share market", "sensex", "nifty", "election", "budget"
+]
+
+
+def needs_web_info(text):
+    t = text.lower()
+    return any(k in t for k in WEB_INFO_KEYWORDS)
+
+
+def fetch_web_info(query):
+    """Sirf current/factual info nikalne ke liye halka compound-mini call - persona wala reply nahi, sirf raw fact."""
+    try:
+        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
+        payload = {
+            "model": "groq/compound-mini",
+            "messages": [{"role": "user", "content": query}],
+            "max_completion_tokens": 300
+        }
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
+        data = r.json()
+        if "choices" not in data:
+            print("WEB INFO FETCH ERROR (status " + str(r.status_code) + "): " + str(data))
+            return None
+        info = data["choices"][0]["message"]["content"]
+        if info and len(info) > 600:
+            info = info[:600] + "..."
+        return info
+    except Exception as e:
+        print("WEB INFO FETCH EXCEPTION: " + str(e))
+        return None
+
+
 def get_ai_reply(user_id, user_text):
     try:
         history = get_user_history(user_id)
@@ -699,15 +735,28 @@ def get_ai_reply(user_id, user_text):
 
         messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages_for_ai.extend(packed)
+
+        # sirf jab query ko current/web info chahiye, tabhi alag se search karo
+        if needs_web_info(user_text_trimmed):
+            web_info = fetch_web_info(user_text_trimmed)
+            if web_info:
+                messages_for_ai.append({
+                    "role": "system",
+                    "content": "Web se ye latest info mili hai, isi ke aadhar pe apne dost wale 2-line Hinglish andaz mein jawab do: " + web_info
+                })
+
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
 
+        # normal chat hamesha plain model se, jaisa pehle tha - koi extra load nahi
         headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
-        payload = {"model": "groq/compound", "messages": messages_for_ai}
-        res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=30)
+        payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai}
+        res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
         res_json = res.json()
+
         if "choices" not in res_json:
             print("GROQ API ERROR RESPONSE (status " + str(res.status_code) + "): " + str(res_json))
             return "Arre yaar, dimaag hang ho gaya"
+
         reply_text = res_json["choices"][0]["message"]["content"]
 
         now = time.time()
