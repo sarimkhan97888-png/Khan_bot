@@ -696,6 +696,39 @@ GENERAL_KNOWLEDGE_PATTERN = re.compile(
 )
 
 
+RETRY_WAIT_PATTERN = re.compile(r'try again in ([0-9.]+)s', re.IGNORECASE)
+
+
+def call_groq(payload, timeout=20, max_retries=1):
+    """Groq ko call karta hai. Agar 429 rate-limit aaye to Groq ke bataye wait-time tak rukke
+    khud-ba-khud retry karta hai, taaki user ko error na dikhe."""
+    headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
+    attempt = 0
+    while True:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        if "choices" in data:
+            return r, data
+
+        err = data.get("error", {})
+        is_rate_limit = (r.status_code == 429) or (err.get("code") == "rate_limit_exceeded")
+
+        if is_rate_limit and attempt < max_retries:
+            wait_match = RETRY_WAIT_PATTERN.search(err.get("message", ""))
+            wait_time = float(wait_match.group(1)) if wait_match else 5.0
+            wait_time = min(wait_time + 0.5, 15.0)  # thoda buffer, aur zyada der na ruke
+            print("RATE LIMIT HIT, waiting " + str(round(wait_time, 1)) + "s then retrying (attempt " + str(attempt + 1) + ")")
+            time.sleep(wait_time)
+            attempt += 1
+            continue
+
+        return r, data
+
+
 def needs_web_info(text):
     t = text.lower()
     if any(k in t for k in WEB_INFO_KEYWORDS):
@@ -708,14 +741,12 @@ def needs_web_info(text):
 def fetch_web_info(query):
     """Sirf current/factual info nikalne ke liye halka compound-mini call - persona wala reply nahi, sirf raw fact."""
     try:
-        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
         payload = {
             "model": "groq/compound-mini",
             "messages": [{"role": "user", "content": query}],
             "max_completion_tokens": 300
         }
-        r = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
-        data = r.json()
+        r, data = call_groq(payload, timeout=20)
         if "choices" not in data:
             print("WEB INFO FETCH ERROR (status " + str(r.status_code) + "): " + str(data))
             return None
@@ -768,13 +799,14 @@ def get_ai_reply(user_id, user_text):
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
 
         # normal chat hamesha plain model se, jaisa pehle tha - koi extra load nahi
-        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
         payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai}
-        res = requests.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=20)
-        res_json = res.json()
+        res, res_json = call_groq(payload, timeout=20)
 
         if "choices" not in res_json:
             print("GROQ API ERROR RESPONSE (status " + str(res.status_code) + "): " + str(res_json))
+            err_code = res_json.get("error", {}).get("code", "")
+            if err_code == "rate_limit_exceeded" or res.status_code == 429:
+                return "Arre thoda ruk yaar, bahut load hai abhi. 1 min baad phir try karo."
             return "Arre yaar, dimaag hang ho gaya"
 
         reply_text = res_json["choices"][0]["message"]["content"]
