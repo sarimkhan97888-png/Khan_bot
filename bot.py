@@ -675,10 +675,31 @@ def handle_pin(chat_id, message):
 def get_ai_reply(user_id, user_text):
     try:
         history = get_user_history(user_id)
+
+        MAX_TOTAL_CHARS = 40000  # safe budget jisse Groq 413 na de, isi ke andar jitni history fit ho sake utni jaayegi
+
+        def trim(text, limit=4000):
+            if text and len(text) > limit:
+                return text[:limit] + "..."
+            return text
+
+        user_text_trimmed = trim(user_text)
+
+        # sabse recent messages se peeche ki taraf jao, jitna budget mein fit ho utna lo
+        packed = []
+        used_chars = len(SYSTEM_PROMPT) + len(user_text_trimmed)
+        for h in reversed(history):
+            content = trim(h["content"])
+            entry_len = len(content)
+            if used_chars + entry_len > MAX_TOTAL_CHARS:
+                break
+            packed.append({"role": h["role"], "content": content})
+            used_chars += entry_len
+        packed.reverse()
+
         messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
-        for h in history:
-            messages_for_ai.append({"role": h["role"], "content": h["content"]})
-        messages_for_ai.append({"role": "user", "content": user_text})
+        messages_for_ai.extend(packed)
+        messages_for_ai.append({"role": "user", "content": user_text_trimmed})
 
         headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
         payload = {"model": "groq/compound", "messages": messages_for_ai}
