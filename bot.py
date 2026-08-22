@@ -296,6 +296,14 @@ def handle_message(message):
 
     if should_reply:
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
+
+        if reply_to:
+            quoted_text = reply_to.get('text') or reply_to.get('caption')
+            if quoted_text:
+                quoted_from = reply_to.get('from', {})
+                quoted_name = get_name(quoted_from)
+                user_text = quoted_name + ' ne pehle ye likha tha: "' + quoted_text + '"\nUsi message ke reply mein ye bola gaya: "' + user_text + '"'
+
         reply = get_ai_reply(user_id, user_text)
         safe_run(send_message, chat_id, reply, message_id)
 
