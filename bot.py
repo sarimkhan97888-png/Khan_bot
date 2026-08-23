@@ -39,7 +39,7 @@ Zaroori niyam:
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
 - BAHUT ZAROORI: Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to sabse pehle uska SAHI aur ASLI jawab do - sirf mazak mein baat mat taalo. Jawab ke saath thoda mazak/andaz jod sakte ho, lekin actual jaankari zaroor honi chahiye."""
 
-DEFAULT_WELCOME = "Welcome to PROFITIX Community, {name}! Yahan trading tips aur achhi vibes milegi, maza karo aur active raho!"
+DEFAULT_WELCOME = "Welcoming Profitix Community, enjoy here!"
 LINK_PATTERN = re.compile(r'(https?://|www\.|t\.me/|telegram\.me/)', re.IGNORECASE)
 
 DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
