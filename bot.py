@@ -4,6 +4,7 @@ import os
 import time
 import traceback
 import re
+import random
 
 app = Flask(__name__)
 
@@ -39,7 +40,41 @@ Zaroori niyam:
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
 - BAHUT ZAROORI: Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to sabse pehle uska SAHI aur ASLI jawab do - sirf mazak mein baat mat taalo. Jawab ke saath thoda mazak/andaz jod sakte ho, lekin actual jaankari zaroor honi chahiye."""
 
-DEFAULT_WELCOME = "Welcoming Profitix Community, enjoy here!"
+DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
+
+WELCOME_EXTRAS = [
+    "Kaise ho bhai, mast raho!",
+    "Active raho, maza karo!",
+    "Chai-paani ready hai, aaram se ghusiye ☕",
+    "Bas ek hi rule hai - vibe positive rakho!",
+    "Ummeed hai maza aayega yahan 🔥",
+    "Settle ho jao, family jaisa hi hai yahan sab 🤝",
+    "Dhamaal machane ke liye taiyaar ho jao!",
+    "Sab log yahan chill hi karte hain, aap bhi kar lo!",
+]
+
+
+def escape_html(text):
+    if text is None:
+        return ""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def mention_html(user_id, name):
+    """Naam ko blue clickable mention ki tarah dikhata hai (Telegram HTML parse mode)."""
+    return '<a href="tg://user?id=' + str(user_id) + '">' + escape_html(name) + '</a>'
+
+
+def build_welcome_message(settings, user_id, name):
+    mention = mention_html(user_id, name)
+    base = settings.get('welcome', DEFAULT_WELCOME).replace("{name}", mention)
+    extra = random.choice(WELCOME_EXTRAS)
+    return base + "\n" + extra
+
+
+def build_leave_message(user_id, name, group_name):
+    mention = mention_html(user_id, name)
+    return mention + " ne " + escape_html(group_name) + " se leave kar diya 👋"
 LINK_PATTERN = re.compile(r'(https?://|www\.|t\.me/|telegram\.me/)', re.IGNORECASE)
 
 DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
@@ -160,13 +195,14 @@ def handle_chat_member_update(update):
         if already_announced(chat_id, user_id, "join"):
             return
         settings = get_settings(chat_id)
-        welcome_text = settings['welcome'].replace("{name}", name)
-        safe_run(send_message, chat_id, welcome_text)
+        welcome_text = build_welcome_message(settings, user_id, name)
+        safe_run(send_message, chat_id, welcome_text, None, "HTML")
 
     elif was_in and not is_in:
         if already_announced(chat_id, user_id, "leave"):
             return
-        safe_run(send_message, chat_id, name + " ne " + group_name + " se leave kar diya")
+        leave_text = build_leave_message(user_id, name, group_name)
+        safe_run(send_message, chat_id, leave_text, None, "HTML")
 
 
 @app.route('/webhook', methods=['POST'])
@@ -232,9 +268,38 @@ def handle_message(message):
                 return
             if stage == 'await_broadcast':
                 target_chat = state['chat_id']
-                broadcast_text = "📢 NOTICE BY OWNER 📢\n➖➖➖➖➖➖➖➖➖➖➖\n\n" + text + "\n\n➖➖➖➖➖➖➖➖➖➖➖"
-                safe_run(send_message, target_chat, broadcast_text)
-                safe_run(send_message, chat_id, "Broadcast bhej diya gaya group mein.")
+                media_type = state.get('media_type', 'text')
+
+                if media_type == 'photo':
+                    photo = message.get('photo')
+                    if not photo:
+                        safe_run(send_message, chat_id, "Ye photo nahi hai, photo bhejo.")
+                        return
+                    file_id = photo[-1]['file_id']
+                    caption = message.get('caption', '')
+                    full_caption = "📢 NOTICE BY OWNER 📢\n➖➖➖➖➖➖➖➖➖➖➖\n\n" + caption if caption else "📢 NOTICE BY OWNER 📢"
+                    safe_run(send_broadcast_photo, target_chat, file_id, full_caption)
+                    safe_run(send_message, chat_id, "Photo broadcast bhej diya gaya group mein.")
+
+                elif media_type == 'video':
+                    video = message.get('video')
+                    if not video:
+                        safe_run(send_message, chat_id, "Ye video nahi hai, video bhejo.")
+                        return
+                    file_id = video['file_id']
+                    caption = message.get('caption', '')
+                    full_caption = "📢 NOTICE BY OWNER 📢\n➖➖➖➖➖➖➖➖➖➖➖\n\n" + caption if caption else "📢 NOTICE BY OWNER 📢"
+                    safe_run(send_broadcast_video, target_chat, file_id, full_caption)
+                    safe_run(send_message, chat_id, "Video broadcast bhej diya gaya group mein.")
+
+                else:
+                    if not text:
+                        safe_run(send_message, chat_id, "Text likho broadcast ke liye.")
+                        return
+                    broadcast_text = "📢 NOTICE BY OWNER 📢\n➖➖➖➖➖➖➖➖➖➖➖\n\n" + text + "\n\n➖➖➖➖➖➖➖➖➖➖➖"
+                    safe_run(send_message, target_chat, broadcast_text)
+                    safe_run(send_message, chat_id, "Broadcast bhej diya gaya group mein.")
+
                 panel_state.pop(user_id, None)
                 return
             if stage == 'await_welcome':
@@ -256,8 +321,8 @@ def handle_message(message):
             if already_announced(chat_id, member.get('id'), "join"):
                 continue
             name = member.get('first_name', 'dost')
-            welcome_text = settings['welcome'].replace("{name}", name)
-            safe_run(send_message, chat_id, welcome_text)
+            welcome_text = build_welcome_message(settings, member.get('id'), name)
+            safe_run(send_message, chat_id, welcome_text, None, "HTML")
         return
 
     if 'left_chat_member' in message:
@@ -266,11 +331,15 @@ def handle_message(message):
         group_name = chat.get('title', 'group')
         if not left_member.get('is_bot', False):
             if not already_announced(chat_id, left_member.get('id'), "leave"):
-                safe_run(send_message, chat_id, left_name + " ne " + group_name + " se leave kar diya")
+                leave_text = build_leave_message(left_member.get('id'), left_name, group_name)
+                safe_run(send_message, chat_id, leave_text, None, "HTML")
         return
 
     if not text:
         return
+
+    if chat_type in ("group", "supergroup"):
+        safe_run(react_to_message, chat_id, message_id)
 
     if user_id in waiting_for_welcome and waiting_for_welcome[user_id] == chat_id:
         settings['welcome'] = text
@@ -568,13 +637,32 @@ def handle_callback(callback):
         safe_run(answer_callback, callback['id'], "Ok")
         return
 
+    if data_str.startswith("bctype:"):
+        parts = data_str.split(":")
+        media_type = parts[1]
+        gid = int(parts[2])
+        panel_state[owner_id] = {"stage": "await_broadcast", "chat_id": gid, "media_type": media_type}
+        if media_type == "photo":
+            prompt = "Ab photo bhejo (caption bhi daal sakte ho sath mein, ya bina caption ke bhi chalega)."
+        elif media_type == "video":
+            prompt = "Ab video bhejo (caption bhi daal sakte ho sath mein, ya bina caption ke bhi chalega)."
+        else:
+            prompt = "Ab jo text likhoge wahi broadcast ho jaayega. Likho:"
+        safe_run(send_message, owner_dm_chat_id, prompt)
+        safe_run(answer_callback, callback['id'], "Ok")
+        return
+
     if data_str.startswith("panelmenu:"):
         parts = data_str.split(":")
         action = parts[1]
         gid = int(parts[2])
         if action == "broadcast":
-            panel_state[owner_id] = {"stage": "await_broadcast", "chat_id": gid}
-            safe_run(send_message, owner_dm_chat_id, "Theek hai, ab jo message bhejoge wahi group mein broadcast ho jaayega. Likho:")
+            buttons = [
+                [{"text": "📝 Sirf Text", "callback_data": "bctype:text:" + str(gid)}],
+                [{"text": "📷 Photo ke saath", "callback_data": "bctype:photo:" + str(gid)}],
+                [{"text": "🎥 Video ke saath", "callback_data": "bctype:video:" + str(gid)}],
+            ]
+            safe_run(send_message_with_keyboard, owner_dm_chat_id, "Broadcast mein kya bhejna hai?", {"inline_keyboard": buttons})
         elif action == "userselect":
             panel_state[owner_id] = {"stage": "await_user", "chat_id": gid}
             safe_run(send_message, owner_dm_chat_id, "Us member ka username bhejo (bina @) ya uska koi message forward karo.")
@@ -999,15 +1087,59 @@ def get_ai_reply(user_id, user_text):
         return "Arre yaar, dimaag hang ho gaya"
 
 
-def send_message(chat_id, text, reply_to=None):
+def send_message(chat_id, text, reply_to=None, parse_mode=None):
     try:
         payload = {"chat_id": chat_id, "text": text}
         if reply_to:
             payload["reply_to_message_id"] = reply_to
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         r = requests.post(TELEGRAM_URL + "/sendMessage", json=payload, timeout=10)
         return r.json()
     except Exception as e:
         print("SEND ERROR: " + str(e))
+        return None
+
+
+REACTION_EMOJIS = ["👍", "😁", "🔥", "❤", "👏", "🤔", "😢", "🎉", "🤩", "👌", "🙏", "💯"]
+
+
+def react_to_message(chat_id, message_id):
+    try:
+        emoji = random.choice(REACTION_EMOJIS)
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{"type": "emoji", "emoji": emoji}]
+        }
+        r = requests.post(TELEGRAM_URL + "/setMessageReaction", json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        print("REACT ERROR: " + str(e))
+        return None
+
+
+def send_broadcast_photo(chat_id, file_id, caption=None):
+    try:
+        payload = {"chat_id": chat_id, "photo": file_id}
+        if caption:
+            payload["caption"] = caption[:1024]
+        r = requests.post(TELEGRAM_URL + "/sendPhoto", json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        print("SEND PHOTO ERROR: " + str(e))
+        return None
+
+
+def send_broadcast_video(chat_id, file_id, caption=None):
+    try:
+        payload = {"chat_id": chat_id, "video": file_id}
+        if caption:
+            payload["caption"] = caption[:1024]
+        r = requests.post(TELEGRAM_URL + "/sendVideo", json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        print("SEND VIDEO ERROR: " + str(e))
         return None
 
 
