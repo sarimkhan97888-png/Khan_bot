@@ -457,7 +457,7 @@ def handle_message(message):
         if wants_voice(text):
             audio = generate_tts(reply)
             if audio:
-                safe_run(send_voice, chat_id, audio, reply, message_id)
+                safe_run(send_voice, chat_id, audio, None, message_id)
                 return
             # TTS fail ho jaaye to normal text reply chala jaaye, chup nahi rehna
 
