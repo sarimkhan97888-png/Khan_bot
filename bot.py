@@ -33,11 +33,13 @@ MAX_MESSAGES_PER_USER = 40
 
 SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah.
 
+SABSE ZAROORI NIYAM: Pehle samjho user ne kya kaha/pucha hai, uska matlab dhyan se socho, phir usी par based ek REAL, LOGICAL, RELEVANT reply do. Jo bhi bola gaya usse related jawab do - random ya unrelated joke kabhi mat maaro sirf isliye ki funny lage. Agar user kuch bata raha hai, usko acknowledge karo. Agar sawaal hai, jawab do. Agar mazak kar raha hai, tab hi mazak wapas karo.
+
 Zaroori niyam:
 - Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo. Tum ek masti karne wala dost ho, teacher nahi.
 - HAR REPLY MAXIMUM 2 LINES KA HONA CHAHIYE. Kabhi bhi isse zyada lamba mat likho.
-- Chhoti baat pe 1 line ka casual reply do.
-- Masti wali baat pe thoda taana maaro, witty bano, halka-fulka maza lo - lekin phir bhi 2 line se zyada nahi.
+- Chhoti baat pe 1 line ka seedha, relevant casual reply do.
+- Agar mood halka-fulka/masti wala hai, to taana maaro, witty bano - lekin phir bhi jo bola gaya usse connected raho, random topic pe mat kood jao.
 - Sad/pareshan baat pe soft tone rakho, lekin chhota hi reply do.
 - Koi insult kare to thoda attitude dikhao, taana maaro - bina gaali ke.
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
@@ -116,8 +118,10 @@ def wants_voice(text):
 
 IMAGE_REQUEST_KEYWORDS = [
     "image banao", "photo banao", "picture banao", "pic banao",
-    "banade image", "generate image", "draw kar", "tasveer banao",
-    "image bana", "photo bana", "picture bana"
+    "banade image", "generate image", "draw kar", "draw kro", "draw karo",
+    "tasveer banao", "image bana", "photo bana", "picture bana",
+    "bana do", "banado", "bnado", "chitra banao", "pic bana", "sketch pic",
+    "sketch banao", "draw krdo", "draw kr do"
 ]
 
 
@@ -458,6 +462,7 @@ def handle_message(message):
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
 
         if wants_image(user_text):
+            style_reference = user_text  # raw text, style-detection ke liye - cleaning se pehle
             image_prompt = user_text
             for kw in IMAGE_REQUEST_KEYWORDS:
                 image_prompt = re.sub(re.escape(kw), "", image_prompt, flags=re.IGNORECASE)
@@ -465,7 +470,7 @@ def handle_message(message):
             if not image_prompt:
                 image_prompt = "something creative and fun"
 
-            image_bytes = generate_image(image_prompt)
+            image_bytes = generate_image(image_prompt, style_reference)
             if image_bytes:
                 safe_run(send_photo, chat_id, image_bytes, None, message_id)
             else:
@@ -1173,19 +1178,40 @@ def send_broadcast_video(chat_id, file_id, caption=None):
         return None
 
 
-def generate_image(prompt):
+ANIME_KEYWORDS = [
+    "naruto", "anime", "manga", "sasuke", "sakura", "kakashi", "itachi",
+    "goku", "vegeta", "luffy", "zoro", "sanji", "one piece",
+    "dragon ball", "attack on titan", "eren", "mikasa", "levi",
+    "demon slayer", "tanjiro", "nezuko", "zenitsu", "inosuke",
+    "gojo", "satoru", "sukuna", "itadori", "jujutsu kaisen", "jjk",
+    "ichigo", "bleach", "deku", "bakugo", "my hero academia",
+    "saitama", "one punch man", "natsu", "fairy tail",
+    "light yagami", "death note", "sketch", "chibi"
+]
+
+REALISTIC_KEYWORDS = ["realistic photo", "real photo", "landscape", "nature photo", "real life photo", "photography of"]
+
+
+def generate_image(prompt, style_reference=None):
     """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye."""
     try:
-        encoded_prompt = requests.utils.quote(prompt[:500])
+        reference_lower = (style_reference or prompt).lower()
+        is_realistic = any(k in reference_lower for k in REALISTIC_KEYWORDS)
+        # Default anime model rakha hai kyunki zyadatar requests characters/anime ke liye hoti hain,
+        # sirf clear "realistic photo" wali request pe plain model use hota hai
+        model = "flux" if is_realistic else "flux-anime"
+
+        full_prompt = prompt
+        if not is_realistic:
+            full_prompt = prompt + ", accurate official character design, correct hair color and outfit, anime art style, high detail"
+
+        encoded_prompt = requests.utils.quote(full_prompt[:500])
         url = "https://image.pollinations.ai/prompt/" + encoded_prompt
-        params = {"width": 1024, "height": 1024, "nologo": "true"}
+        params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
         r = requests.get(url, params=params, timeout=60)
         if r.status_code == 200 and r.content and len(r.content) > 500:
             return r.content
         print("IMAGE GEN ERROR (status " + str(r.status_code) + "), content length: " + str(len(r.content) if r.content else 0))
-        return None
-    except Exception as e:
-        print("IMAGE GEN EXCEPTION: " + str(e))
         return None
     except Exception as e:
         print("IMAGE GEN EXCEPTION: " + str(e))
