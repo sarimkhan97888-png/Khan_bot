@@ -125,6 +125,50 @@ def is_owner(user_id):
     return str(user_id) == str(OWNER_ID)
 
 
+recent_member_events = {}
+
+
+def already_announced(chat_id, user_id, action):
+    """Dedup: agar wahi event (join/leave) 30 second ke andar dono tareeke se (message + chat_member) aaye to double message na jaaye."""
+    key = (chat_id, user_id, action)
+    now = time.time()
+    last = recent_member_events.get(key)
+    if last and (now - last) < 30:
+        return True
+    recent_member_events[key] = now
+    return False
+
+
+def handle_chat_member_update(update):
+    chat = update.get('chat', {})
+    chat_id = chat.get('id')
+    group_name = chat.get('title', 'group')
+
+    old_status = update.get('old_chat_member', {}).get('status')
+    new_status = update.get('new_chat_member', {}).get('status')
+    user = update.get('new_chat_member', {}).get('user', {})
+    user_id = user.get('id')
+    name = user.get('first_name', 'Kisi ne')
+
+    if user.get('is_bot', False):
+        return
+
+    was_in = old_status in ("member", "administrator", "restricted", "creator")
+    is_in = new_status in ("member", "administrator", "restricted", "creator")
+
+    if not was_in and is_in:
+        if already_announced(chat_id, user_id, "join"):
+            return
+        settings = get_settings(chat_id)
+        welcome_text = settings['welcome'].replace("{name}", name)
+        safe_run(send_message, chat_id, welcome_text)
+
+    elif was_in and not is_in:
+        if already_announced(chat_id, user_id, "leave"):
+            return
+        safe_run(send_message, chat_id, name + " ne " + group_name + " se leave kar diya")
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -136,6 +180,11 @@ def webhook():
         if 'callback_query' in data:
             safe_run(handle_callback, data['callback_query'])
             return {"ok": True}
+
+        if 'chat_member' in data:
+            safe_run(handle_chat_member_update, data['chat_member'])
+            return {"ok": True}
+
         if 'message' not in data:
             return {"ok": True}
 
@@ -202,6 +251,10 @@ def handle_message(message):
 
     if 'new_chat_members' in message:
         for member in message['new_chat_members']:
+            if member.get('is_bot', False):
+                continue
+            if already_announced(chat_id, member.get('id'), "join"):
+                continue
             name = member.get('first_name', 'dost')
             welcome_text = settings['welcome'].replace("{name}", name)
             safe_run(send_message, chat_id, welcome_text)
@@ -212,7 +265,8 @@ def handle_message(message):
         left_name = left_member.get('first_name', 'Kisi ne')
         group_name = chat.get('title', 'group')
         if not left_member.get('is_bot', False):
-            safe_run(send_message, chat_id, left_name + " ne " + group_name + " se leave kar diya")
+            if not already_announced(chat_id, left_member.get('id'), "leave"):
+                safe_run(send_message, chat_id, left_name + " ne " + group_name + " se leave kar diya")
         return
 
     if not text:
