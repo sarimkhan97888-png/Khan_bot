@@ -36,7 +36,8 @@ Zaroori niyam:
 - Masti wali baat pe thoda taana maaro, witty bano, halka-fulka maza lo - lekin phir bhi 2 line se zyada nahi.
 - Sad/pareshan baat pe soft tone rakho, lekin chhota hi reply do.
 - Koi insult kare to thoda attitude dikhao, taana maaro - bina gaali ke.
-- Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna."""
+- Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
+- BAHUT ZAROORI: Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to sabse pehle uska SAHI aur ASLI jawab do - sirf mazak mein baat mat taalo. Jawab ke saath thoda mazak/andaz jod sakte ho, lekin actual jaankari zaroor honi chahiye."""
 
 DEFAULT_WELCOME = "Welcome to PROFITIX Community, {name}! Yahan trading tips aur achhi vibes milegi, maza karo aur active raho!"
 LINK_PATTERN = re.compile(r'(https?://|www\.|t\.me/|telegram\.me/)', re.IGNORECASE)
@@ -61,6 +62,18 @@ def mentions_khan(text):
     cleaned = re.sub(r'[^a-zA-Z\s]', ' ', text.lower())
     tokens = cleaned.split()
     return "khan" in tokens
+
+
+VOICE_REQUEST_KEYWORDS = [
+    "sunao", "sunade", "sun de", "awaaz me", "awaz me", "awaaz mein", "awaz mein",
+    "voice me", "voice mein", "voice message", "bol ke sunao", "bolke sunao",
+    "bol kar sunao", "voice bhej"
+]
+
+
+def wants_voice(text):
+    t = text.lower()
+    return any(k in t for k in VOICE_REQUEST_KEYWORDS)
 
 
 def contains_bad_word(text):
@@ -185,9 +198,6 @@ def handle_message(message):
         return
 
     # ================= GROUP CHAT =================
-    if not text:
-        return
-
     settings = get_settings(chat_id)
 
     if 'new_chat_members' in message:
@@ -195,6 +205,17 @@ def handle_message(message):
             name = member.get('first_name', 'dost')
             welcome_text = settings['welcome'].replace("{name}", name)
             safe_run(send_message, chat_id, welcome_text)
+        return
+
+    if 'left_chat_member' in message:
+        left_member = message['left_chat_member']
+        left_name = left_member.get('first_name', 'Kisi ne')
+        group_name = chat.get('title', 'group')
+        if not left_member.get('is_bot', False):
+            safe_run(send_message, chat_id, left_name + " ne " + group_name + " se leave kar diya")
+        return
+
+    if not text:
         return
 
     if user_id in waiting_for_welcome and waiting_for_welcome[user_id] == chat_id:
@@ -306,6 +327,14 @@ def handle_message(message):
                 user_text = quoted_name + ' ne pehle ye likha tha: "' + quoted_text + '"\nUsi message ke reply mein ye bola gaya: "' + user_text + '"'
 
         reply = get_ai_reply(user_id, user_text)
+
+        if wants_voice(text):
+            audio = generate_tts(reply)
+            if audio:
+                safe_run(send_voice, chat_id, audio, reply, message_id)
+                return
+            # TTS fail ho jaaye to normal text reply chala jaaye, chup nahi rehna
+
         safe_run(send_message, chat_id, reply, message_id)
 
 
@@ -875,7 +904,7 @@ def get_ai_reply(user_id, user_text):
             if web_info:
                 messages_for_ai.append({
                     "role": "system",
-                    "content": "Web se ye latest info mili hai, isi ke aadhar pe apne dost wale 2-line Hinglish andaz mein jawab do: " + web_info
+                    "content": "Web se ye REAL aur LATEST jaankari mili hai. Isi info ka use karke user ke sawaal ka SAHI aur ASLI jawab do (Khan ke dost wale 2-line Hinglish andaz mein, thoda mazak bhi jod sakte ho) - lekin jawab mein actual jaankari zaroor honi chahiye, sirf mazak mein mat taal do: " + web_info
                 })
 
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
@@ -925,6 +954,42 @@ def send_message(chat_id, text, reply_to=None):
         return r.json()
     except Exception as e:
         print("SEND ERROR: " + str(e))
+        return None
+
+
+def generate_tts(text):
+    """Bot ki apni reply text ko voice mein convert karta hai (Groq playai-tts). Real copyrighted
+    gaano ke lyrics ke liye use nahi hota - sirf bot ki khud ki generated lines ke liye."""
+    try:
+        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY), "Content-Type": "application/json"}
+        payload = {
+            "model": "playai-tts",
+            "input": text[:500],
+            "voice": "Fritz-PlayAI",
+            "response_format": "ogg"
+        }
+        r = requests.post("https://api.groq.com/openai/v1/audio/speech", json=payload, headers=headers, timeout=30)
+        if r.status_code == 200 and r.content:
+            return r.content
+        print("TTS ERROR (status " + str(r.status_code) + "): " + str(r.text[:300]))
+        return None
+    except Exception as e:
+        print("TTS EXCEPTION: " + str(e))
+        return None
+
+
+def send_voice(chat_id, audio_bytes, caption=None, reply_to=None):
+    try:
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption[:1024]
+        if reply_to:
+            data["reply_to_message_id"] = reply_to
+        files = {"voice": ("voice.ogg", audio_bytes, "audio/ogg")}
+        r = requests.post(TELEGRAM_URL + "/sendVoice", data=data, files=files, timeout=30)
+        return r.json()
+    except Exception as e:
+        print("SEND VOICE ERROR: " + str(e))
         return None
 
 
