@@ -5,6 +5,9 @@ import time
 import traceback
 import re
 import random
+import base64
+import io
+import wave
 
 app = Flask(__name__)
 
@@ -1143,22 +1146,54 @@ def send_broadcast_video(chat_id, file_id, caption=None):
         return None
 
 
+def pcm_to_wav_bytes(pcm_bytes, channels=1, rate=24000, sample_width=2):
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(rate)
+        wf.writeframes(pcm_bytes)
+    return buf.getvalue()
+
+
 def generate_tts(text):
-    """Bot ki apni reply text ko voice mein convert karta hai (Groq playai-tts). Real copyrighted
-    gaano ke lyrics ke liye use nahi hota - sirf bot ki khud ki generated lines ke liye."""
-    try:
-        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY), "Content-Type": "application/json"}
-        payload = {
-            "model": "playai-tts",
-            "input": text[:500],
-            "voice": "Fritz-PlayAI",
-            "response_format": "ogg"
-        }
-        r = requests.post("https://api.groq.com/openai/v1/audio/speech", json=payload, headers=headers, timeout=30)
-        if r.status_code == 200 and r.content:
-            return r.content
-        print("TTS ERROR (status " + str(r.status_code) + "): " + str(r.text[:300]))
+    """Bot ki apni reply text ko voice mein convert karta hai (Gemini TTS - Hindi/Hinglish
+    natively samajhta hai). Real copyrighted gaano ke lyrics ke liye use nahi hota - sirf
+    bot ki khud ki generated lines ke liye."""
+    if not GEMINI_API_KEY:
+        print("TTS SKIP: GEMINI_API_KEY set nahi hai")
         return None
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+        prompt_text = "Ise natural Hinglish (Hindi-English mix) mein, ek dost jaise casual tone mein Hindi accent ke saath bolo: " + text[:500]
+        payload = {
+            "contents": [{"parts": [{"text": prompt_text}]}],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}}
+            }
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        data = r.json()
+        candidates = data.get("candidates")
+        if not candidates:
+            print("GEMINI TTS ERROR (status " + str(r.status_code) + "): " + str(data))
+            return None
+
+        audio_b64 = None
+        for p in candidates[0].get("content", {}).get("parts", []):
+            inline = p.get("inlineData") or p.get("inline_data")
+            if inline and inline.get("data"):
+                audio_b64 = inline["data"]
+                break
+
+        if not audio_b64:
+            print("GEMINI TTS: audio data nahi mila response mein: " + str(data))
+            return None
+
+        pcm_bytes = base64.b64decode(audio_b64)
+        return pcm_to_wav_bytes(pcm_bytes)
     except Exception as e:
         print("TTS EXCEPTION: " + str(e))
         return None
@@ -1171,8 +1206,8 @@ def send_voice(chat_id, audio_bytes, caption=None, reply_to=None):
             data["caption"] = caption[:1024]
         if reply_to:
             data["reply_to_message_id"] = reply_to
-        files = {"voice": ("voice.ogg", audio_bytes, "audio/ogg")}
-        r = requests.post(TELEGRAM_URL + "/sendVoice", data=data, files=files, timeout=30)
+        files = {"audio": ("voice.wav", audio_bytes, "audio/wav")}
+        r = requests.post(TELEGRAM_URL + "/sendAudio", data=data, files=files, timeout=30)
         return r.json()
     except Exception as e:
         print("SEND VOICE ERROR: " + str(e))
