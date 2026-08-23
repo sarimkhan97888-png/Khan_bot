@@ -114,6 +114,18 @@ def wants_voice(text):
     return any(k in t for k in VOICE_REQUEST_KEYWORDS)
 
 
+IMAGE_REQUEST_KEYWORDS = [
+    "image banao", "photo banao", "picture banao", "pic banao",
+    "banade image", "generate image", "draw kar", "tasveer banao",
+    "image bana", "photo bana", "picture bana"
+]
+
+
+def wants_image(text):
+    t = text.lower()
+    return any(k in t for k in IMAGE_REQUEST_KEYWORDS)
+
+
 def contains_bad_word(text):
     cleaned = re.sub(r'[^a-zA-Z\s]', '', text.lower())
     tokens = cleaned.split()
@@ -444,6 +456,14 @@ def handle_message(message):
 
     if should_reply:
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
+
+        if wants_image(user_text):
+            image_bytes = generate_image(user_text)
+            if image_bytes:
+                safe_run(send_photo, chat_id, image_bytes, None, message_id)
+            else:
+                safe_run(send_message, chat_id, "Abhi image nahi bana paya yaar, dobara try karo.", message_id)
+            return
 
         if reply_to:
             quoted_text = reply_to.get('text') or reply_to.get('caption')
@@ -1143,6 +1163,47 @@ def send_broadcast_video(chat_id, file_id, caption=None):
         return r.json()
     except Exception as e:
         print("SEND VIDEO ERROR: " + str(e))
+        return None
+
+
+def generate_image(prompt):
+    """Gemini ke image generation model (Nano Banana) se image banata hai."""
+    if not GEMINI_API_KEY:
+        print("IMAGE GEN SKIP: GEMINI_API_KEY set nahi hai")
+        return None
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+        payload = {"contents": [{"parts": [{"text": prompt[:800]}]}]}
+        r = requests.post(url, json=payload, headers=headers, timeout=45)
+        data = r.json()
+        candidates = data.get("candidates")
+        if not candidates:
+            print("IMAGE GEN ERROR (status " + str(r.status_code) + "): " + str(data))
+            return None
+        for p in candidates[0].get("content", {}).get("parts", []):
+            inline = p.get("inlineData") or p.get("inline_data")
+            if inline and inline.get("data"):
+                return base64.b64decode(inline["data"])
+        print("IMAGE GEN: image data nahi mila response mein: " + str(data))
+        return None
+    except Exception as e:
+        print("IMAGE GEN EXCEPTION: " + str(e))
+        return None
+
+
+def send_photo(chat_id, image_bytes, caption=None, reply_to=None):
+    try:
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption[:1024]
+        if reply_to:
+            data["reply_to_message_id"] = reply_to
+        files = {"photo": ("image.png", image_bytes, "image/png")}
+        r = requests.post(TELEGRAM_URL + "/sendPhoto", data=data, files=files, timeout=45)
+        return r.json()
+    except Exception as e:
+        print("SEND PHOTO ERROR: " + str(e))
         return None
 
 
