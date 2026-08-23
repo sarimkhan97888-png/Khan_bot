@@ -458,7 +458,14 @@ def handle_message(message):
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
 
         if wants_image(user_text):
-            image_bytes = generate_image(user_text)
+            image_prompt = user_text
+            for kw in IMAGE_REQUEST_KEYWORDS:
+                image_prompt = re.sub(re.escape(kw), "", image_prompt, flags=re.IGNORECASE)
+            image_prompt = re.sub(r'\bkhan\b', '', image_prompt, flags=re.IGNORECASE).strip()
+            if not image_prompt:
+                image_prompt = "something creative and fun"
+
+            image_bytes = generate_image(image_prompt)
             if image_bytes:
                 safe_run(send_photo, chat_id, image_bytes, None, message_id)
             else:
@@ -1167,25 +1174,18 @@ def send_broadcast_video(chat_id, file_id, caption=None):
 
 
 def generate_image(prompt):
-    """Gemini ke image generation model (Nano Banana) se image banata hai."""
-    if not GEMINI_API_KEY:
-        print("IMAGE GEN SKIP: GEMINI_API_KEY set nahi hai")
-        return None
+    """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye."""
     try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
-        payload = {"contents": [{"parts": [{"text": prompt[:800]}]}]}
-        r = requests.post(url, json=payload, headers=headers, timeout=45)
-        data = r.json()
-        candidates = data.get("candidates")
-        if not candidates:
-            print("IMAGE GEN ERROR (status " + str(r.status_code) + "): " + str(data))
-            return None
-        for p in candidates[0].get("content", {}).get("parts", []):
-            inline = p.get("inlineData") or p.get("inline_data")
-            if inline and inline.get("data"):
-                return base64.b64decode(inline["data"])
-        print("IMAGE GEN: image data nahi mila response mein: " + str(data))
+        encoded_prompt = requests.utils.quote(prompt[:500])
+        url = "https://image.pollinations.ai/prompt/" + encoded_prompt
+        params = {"width": 1024, "height": 1024, "nologo": "true"}
+        r = requests.get(url, params=params, timeout=60)
+        if r.status_code == 200 and r.content and len(r.content) > 500:
+            return r.content
+        print("IMAGE GEN ERROR (status " + str(r.status_code) + "), content length: " + str(len(r.content) if r.content else 0))
+        return None
+    except Exception as e:
+        print("IMAGE GEN EXCEPTION: " + str(e))
         return None
     except Exception as e:
         print("IMAGE GEN EXCEPTION: " + str(e))
