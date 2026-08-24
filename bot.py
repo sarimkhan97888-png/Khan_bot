@@ -33,17 +33,17 @@ MAX_MESSAGES_PER_USER = 40
 
 SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah.
 
-SABSE ZAROORI NIYAM: Pehle samjho user ne kya kaha/pucha hai, uska matlab dhyan se socho, phir usी par based ek REAL, LOGICAL, RELEVANT reply do. Jo bhi bola gaya usse related jawab do - random ya unrelated joke kabhi mat maaro sirf isliye ki funny lage. Agar user kuch bata raha hai, usko acknowledge karo. Agar sawaal hai, jawab do. Agar mazak kar raha hai, tab hi mazak wapas karo.
+SABSE ZAROORI NIYAM: Jo bhi poocha ya bola gaya hai usko dhyan se samjho aur uska SEEDHA, RELEVANT jawab do. Koi fixed "comedy mode" ya "funny mode" mat lagao - jo pucha hai bas usी ka jawab do, alag se mazak ya taana jodne ki koshish mat karo jab tak user khud masti na kar raha ho.
 
 Zaroori niyam:
-- Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo. Tum ek masti karne wala dost ho, teacher nahi.
-- HAR REPLY MAXIMUM 2 LINES KA HONA CHAHIYE. Kabhi bhi isse zyada lamba mat likho.
-- Chhoti baat pe 1 line ka seedha, relevant casual reply do.
-- Agar mood halka-fulka/masti wala hai, to taana maaro, witty bano - lekin phir bhi jo bola gaya usse connected raho, random topic pe mat kood jao.
-- Sad/pareshan baat pe soft tone rakho, lekin chhota hi reply do.
-- Koi insult kare to thoda attitude dikhao, taana maaro - bina gaali ke.
+- Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo.
+- HAR REPLY MAXIMUM 2 LINES KA HONA CHAHIYE.
+- Jo sawaal poocha gaya hai uska seedha jawab do - forced jokes ya random comedy mat daalo.
+- Agar user khud masti/mazak kar raha hai, tabhi thoda halka-fulka reply do - warna seedha, normal baat karo.
+- Sad/pareshan baat pe soft tone rakho, chhota reply do.
+- Koi insult kare to thoda attitude dikhao - bina gaali ke.
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
-- BAHUT ZAROORI: Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to sabse pehle uska SAHI aur ASLI jawab do - sirf mazak mein baat mat taalo. Jawab ke saath thoda mazak/andaz jod sakte ho, lekin actual jaankari zaroor honi chahiye."""
+- Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to uska SAHI aur ASLI jawab do."""
 
 DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
 
@@ -357,9 +357,6 @@ def handle_message(message):
     if not text:
         return
 
-    if chat_type in ("group", "supergroup"):
-        safe_run(react_to_message, chat_id, message_id)
-
     if user_id in waiting_for_welcome and waiting_for_welcome[user_id] == chat_id:
         settings['welcome'] = text
         del waiting_for_welcome[user_id]
@@ -370,8 +367,10 @@ def handle_message(message):
         if not safe_check_admin(chat_id, user_id):
             try:
                 requests.post(TELEGRAM_URL + "/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
-                name = message.get('from', {}).get('first_name', 'Bhai')
-                safe_run(send_message, chat_id, name + ", yahan link allowed nahi hai bhai.")
+                from_user = message.get('from', {})
+                name = from_user.get('first_name', 'Bhai')
+                mention = mention_html(user_id, name)
+                safe_run(send_message, chat_id, mention + ", yahan link allowed nahi hai bhai.", None, "HTML")
             except Exception as e:
                 print("LINK DELETE ERROR: " + str(e))
             return
@@ -470,11 +469,7 @@ def handle_message(message):
             if not image_prompt:
                 image_prompt = "something creative and fun"
 
-            image_bytes = generate_image(image_prompt, style_reference)
-            if image_bytes:
-                safe_run(send_photo, chat_id, image_bytes, None, message_id)
-            else:
-                safe_run(send_message, chat_id, "Abhi image nahi bana paya yaar, dobara try karo.", message_id)
+            safe_run(handle_image_request, chat_id, message_id, image_prompt, style_reference)
             return
 
         if reply_to:
@@ -1192,7 +1187,7 @@ ANIME_KEYWORDS = [
 REALISTIC_KEYWORDS = ["realistic photo", "real photo", "landscape", "nature photo", "real life photo", "photography of"]
 
 
-def generate_image(prompt, style_reference=None):
+def generate_image(prompt, style_reference=None, reference_info=None):
     """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye."""
     try:
         reference_lower = (style_reference or prompt).lower()
@@ -1202,10 +1197,12 @@ def generate_image(prompt, style_reference=None):
         model = "flux" if is_realistic else "flux-anime"
 
         full_prompt = prompt
+        if reference_info:
+            full_prompt = full_prompt + ", " + reference_info
         if not is_realistic:
-            full_prompt = prompt + ", accurate official character design, correct hair color and outfit, anime art style, high detail"
+            full_prompt = full_prompt + ", accurate official character design, correct hair color and outfit, anime art style, high detail"
 
-        encoded_prompt = requests.utils.quote(full_prompt[:500])
+        encoded_prompt = requests.utils.quote(full_prompt[:800])
         url = "https://image.pollinations.ai/prompt/" + encoded_prompt
         params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
         r = requests.get(url, params=params, timeout=60)
@@ -1216,6 +1213,44 @@ def generate_image(prompt, style_reference=None):
     except Exception as e:
         print("IMAGE GEN EXCEPTION: " + str(e))
         return None
+
+
+def handle_image_request(chat_id, message_id, image_prompt, style_reference):
+    """Image generation ka poora alag system - normal chat flow se bilkul independent.
+    1) Web se subject ki knowledge nikalta hai (accurate dikhne ke liye)
+    2) Progress update karta hai user ko
+    3) Enriched prompt se image banata hai
+    """
+    status = send_message(chat_id, "🎨 Tumhari pic process ho rahi hai... 10%", message_id)
+    status_id = None
+    try:
+        status_id = status.get('result', {}).get('message_id') if status else None
+    except Exception:
+        status_id = None
+
+    if status_id:
+        safe_run(edit_message, chat_id, status_id, "🔎 Reference dhoond raha hu... 40%")
+
+    reference_info = None
+    try:
+        reference_info = fetch_web_info(image_prompt + " - appearance, hair color, eyes, outfit, distinctive features")
+    except Exception as e:
+        print("IMAGE REFERENCE FETCH EXCEPTION: " + str(e))
+
+    if status_id:
+        safe_run(edit_message, chat_id, status_id, "🎨 Image bana raha hu... 80%")
+
+    image_bytes = generate_image(image_prompt, style_reference, reference_info)
+
+    if image_bytes:
+        safe_run(send_photo, chat_id, image_bytes, None, message_id)
+        if status_id:
+            safe_run(delete_message, chat_id, status_id)
+    else:
+        if status_id:
+            safe_run(edit_message, chat_id, status_id, "Abhi image nahi bana paya yaar, dobara try karo.")
+        else:
+            safe_run(send_message, chat_id, "Abhi image nahi bana paya yaar, dobara try karo.", message_id)
 
 
 def send_photo(chat_id, image_bytes, caption=None, reply_to=None):
@@ -1230,6 +1265,26 @@ def send_photo(chat_id, image_bytes, caption=None, reply_to=None):
         return r.json()
     except Exception as e:
         print("SEND PHOTO ERROR: " + str(e))
+        return None
+
+
+def edit_message(chat_id, message_id, text):
+    try:
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        r = requests.post(TELEGRAM_URL + "/editMessageText", json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        print("EDIT MESSAGE ERROR: " + str(e))
+        return None
+
+
+def delete_message(chat_id, message_id):
+    try:
+        payload = {"chat_id": chat_id, "message_id": message_id}
+        r = requests.post(TELEGRAM_URL + "/deleteMessage", json=payload, timeout=10)
+        return r.json()
+    except Exception as e:
+        print("DELETE MESSAGE ERROR: " + str(e))
         return None
 
 
