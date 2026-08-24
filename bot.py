@@ -1219,13 +1219,18 @@ REALISTIC_KEYWORDS = ["realistic photo", "real photo", "landscape", "nature phot
 
 
 def generate_image(prompt, style_reference=None, reference_info=None):
-    """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye."""
+    """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye.
+    Ek model fail ho to agla try karta hai, taaki bot kabhi bhi bina koshish kiye haar na maane."""
     try:
         reference_lower = (style_reference or prompt).lower()
         is_realistic = any(k in reference_lower for k in REALISTIC_KEYWORDS)
         # nanobanana (Google ka Nano Banana model, Pollinations ke through free) characters/anime ke liye
         # sabse accurate hai, realistic photos ke liye flux use karte hain
-        model = "flux" if is_realistic else "nanobanana"
+        primary_model = "flux" if is_realistic else "nanobanana"
+        models_to_try = [primary_model]
+        for backup in ["flux", "turbo"]:
+            if backup not in models_to_try:
+                models_to_try.append(backup)
 
         full_prompt = prompt
         if reference_info:
@@ -1235,19 +1240,15 @@ def generate_image(prompt, style_reference=None, reference_info=None):
 
         encoded_prompt = requests.utils.quote(full_prompt[:800])
         url = "https://image.pollinations.ai/prompt/" + encoded_prompt
-        params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
-        r = requests.get(url, params=params, timeout=60)
-        if r.status_code == 200 and r.content and len(r.content) > 500:
-            return r.content
-        print("IMAGE GEN ERROR (status " + str(r.status_code) + ", model=" + model + "), content length: " + str(len(r.content) if r.content else 0))
 
-        # Agar nanobanana fail ho jaaye, flux ko backup ki tarah try karo
-        if model != "flux":
-            params["model"] = "flux"
-            r2 = requests.get(url, params=params, timeout=60)
-            if r2.status_code == 200 and r2.content and len(r2.content) > 500:
-                return r2.content
-            print("IMAGE GEN BACKUP (flux) ALSO FAILED (status " + str(r2.status_code) + ")")
+        for model in models_to_try:
+            params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
+            r = requests.get(url, params=params, timeout=60)
+            if r.status_code == 200 and r.content and len(r.content) > 500:
+                return r.content
+            print("IMAGE GEN ERROR (status " + str(r.status_code) + ", model=" + model + "), content length: " + str(len(r.content) if r.content else 0) + " - trying next model")
+
+        print("IMAGE GEN: sab models fail ho gaye (" + ", ".join(models_to_try) + ")")
         return None
     except Exception as e:
         print("IMAGE GEN EXCEPTION: " + str(e))
