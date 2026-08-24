@@ -796,6 +796,12 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
 
 
 def moderation_action_and_notify(action, chat_id, target_id, target_name, notify_chat_id, reply_to=None):
+    if action in ("ban", "kick", "mute", "warn"):
+        protection = get_protection_message(chat_id, target_id)
+        if protection:
+            send_message(notify_chat_id, protection, reply_to)
+            return
+
     text, state = do_moderation_action(action, chat_id, target_id, target_name)
     keyboard = None
     if state == "ban":
@@ -822,10 +828,23 @@ def get_target_user(message):
     return reply_msg.get('from')
 
 
+def get_protection_message(chat_id, target_id):
+    """Agar target Owner ya admin hai, to moderation command block karo aur bata do kyun."""
+    if is_owner(target_id):
+        return "Ye Owner hai, ispe koi bhi command kaam nahi karega."
+    if safe_check_admin(chat_id, target_id):
+        return "Ye admin hai, ispe ye command kaam nahi karega."
+    return None
+
+
 def handle_ban(chat_id, message):
     target = get_target_user(message)
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /ban likho!")
+        return
+    protection = get_protection_message(chat_id, target['id'])
+    if protection:
+        send_message(chat_id, protection)
         return
     moderation_action_and_notify("ban", chat_id, target['id'], get_name(target), chat_id)
 
@@ -834,6 +853,10 @@ def handle_kick(chat_id, message):
     target = get_target_user(message)
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /kick likho!")
+        return
+    protection = get_protection_message(chat_id, target['id'])
+    if protection:
+        send_message(chat_id, protection)
         return
     moderation_action_and_notify("kick", chat_id, target['id'], get_name(target), chat_id)
 
@@ -852,6 +875,10 @@ def handle_mute(chat_id, message):
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /mute likho!")
         return
+    protection = get_protection_message(chat_id, target['id'])
+    if protection:
+        send_message(chat_id, protection)
+        return
     moderation_action_and_notify("mute", chat_id, target['id'], get_name(target), chat_id)
 
 
@@ -867,6 +894,10 @@ def handle_warn(chat_id, message):
     target = get_target_user(message)
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /warn likho!")
+        return
+    protection = get_protection_message(chat_id, target['id'])
+    if protection:
+        send_message(chat_id, protection)
         return
     moderation_action_and_notify("warn", chat_id, target['id'], get_name(target), chat_id)
 
@@ -949,7 +980,7 @@ def call_gemini(payload, timeout=20, max_retries=1):
     """Gemini ko call karta hai. 429 aane pe thoda wait karke ek baar retry karta hai."""
     if not GEMINI_API_KEY:
         return None, {"error": {"message": "GEMINI_API_KEY set nahi hai"}}
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     attempt = 0
     while True:
@@ -1192,9 +1223,9 @@ def generate_image(prompt, style_reference=None, reference_info=None):
     try:
         reference_lower = (style_reference or prompt).lower()
         is_realistic = any(k in reference_lower for k in REALISTIC_KEYWORDS)
-        # Default anime model rakha hai kyunki zyadatar requests characters/anime ke liye hoti hain,
-        # sirf clear "realistic photo" wali request pe plain model use hota hai
-        model = "flux" if is_realistic else "flux-anime"
+        # nanobanana (Google ka Nano Banana model, Pollinations ke through free) characters/anime ke liye
+        # sabse accurate hai, realistic photos ke liye flux use karte hain
+        model = "flux" if is_realistic else "nanobanana"
 
         full_prompt = prompt
         if reference_info:
@@ -1208,7 +1239,15 @@ def generate_image(prompt, style_reference=None, reference_info=None):
         r = requests.get(url, params=params, timeout=60)
         if r.status_code == 200 and r.content and len(r.content) > 500:
             return r.content
-        print("IMAGE GEN ERROR (status " + str(r.status_code) + "), content length: " + str(len(r.content) if r.content else 0))
+        print("IMAGE GEN ERROR (status " + str(r.status_code) + ", model=" + model + "), content length: " + str(len(r.content) if r.content else 0))
+
+        # Agar nanobanana fail ho jaaye, flux ko backup ki tarah try karo
+        if model != "flux":
+            params["model"] = "flux"
+            r2 = requests.get(url, params=params, timeout=60)
+            if r2.status_code == 200 and r2.content and len(r2.content) > 500:
+                return r2.content
+            print("IMAGE GEN BACKUP (flux) ALSO FAILED (status " + str(r2.status_code) + ")")
         return None
     except Exception as e:
         print("IMAGE GEN EXCEPTION: " + str(e))
