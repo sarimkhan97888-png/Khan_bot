@@ -27,6 +27,7 @@ known_chats = {}
 group_settings = {}
 panel_state = {}
 waiting_for_welcome = {}
+known_users = {}  # chat_id -> {name_lower: {"id": user_id, "name": display_name}}
 
 HISTORY_HOURS = 24
 MAX_MESSAGES_PER_USER = 40
@@ -43,6 +44,7 @@ Zaroori niyam:
 - Sad/pareshan baat pe soft tone rakho, chhota reply do.
 - Koi insult kare to thoda attitude dikhao - bina gaali ke.
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
+- Jawab ki length sawaal ke hisaab se rakho - chhoti baat ka chhota jawab, thodi detail wali baat ka thoda bada jawab (2 line tak). Har baar sirf "haan" ya "na" jaisa ek-shabd wala jawab mat do jab tak sawaal khud sirf haan/na ka na ho - forced ek-shabd replies ajeeb aur robotic lagte hain, jaise real insaan baat kar hi nahi raha.
 - Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to uska SAHI aur ASLI jawab do."""
 
 DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
@@ -173,6 +175,25 @@ def get_name(user_dict):
     return name
 
 
+def remember_user(chat_id, from_user):
+    """Bot jis-jis user ka message dekhta hai, uska naam-ID yaad rakhta hai - taaki
+    baad mein /ban jaise commands mein naam se bhi target kiya ja sake."""
+    if not from_user or from_user.get('is_bot', False):
+        return
+    uid = from_user.get('id')
+    if not uid:
+        return
+    first = (from_user.get('first_name') or '').strip()
+    last = (from_user.get('last_name') or '').strip()
+    full_name = (first + ' ' + last).strip()
+
+    known_users.setdefault(chat_id, {})
+    if first:
+        known_users[chat_id][first.lower()] = {"id": uid, "name": first}
+    if full_name and full_name.lower() != first.lower():
+        known_users[chat_id][full_name.lower()] = {"id": uid, "name": full_name}
+
+
 def is_owner(user_id):
     if not OWNER_ID:
         return False
@@ -206,6 +227,8 @@ def handle_chat_member_update(update):
 
     if user.get('is_bot', False):
         return
+
+    remember_user(chat_id, user)
 
     was_in = old_status in ("member", "administrator", "restricted", "creator")
     is_in = new_status in ("member", "administrator", "restricted", "creator")
@@ -332,6 +355,7 @@ def handle_message(message):
 
     # ================= GROUP CHAT =================
     settings = get_settings(chat_id)
+    safe_run(remember_user, chat_id, message.get('from'))
 
     if 'new_chat_members' in message:
         for member in message['new_chat_members']:
@@ -509,7 +533,7 @@ def safe_check_admin(chat_id, user_id):
 # ==================== REPORT ====================
 
 def start_report(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /report likho!")
         return
@@ -821,11 +845,24 @@ def answer_callback(callback_id, text):
 
 # ==================== ADMIN COMMANDS (GROUP SE) ====================
 
-def get_target_user(message):
+def get_target_user(chat_id, message):
     reply_msg = message.get('reply_to_message')
-    if not reply_msg:
+    if reply_msg:
+        return reply_msg.get('from')
+
+    text = message.get('text', '')
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
         return None
-    return reply_msg.get('from')
+    name_arg = parts[1].strip().lower()
+    if not name_arg:
+        return None
+
+    chat_users = known_users.get(chat_id, {})
+    match = chat_users.get(name_arg)
+    if match:
+        return {"id": match["id"], "first_name": match["name"]}
+    return None
 
 
 def get_protection_message(chat_id, target_id):
@@ -838,9 +875,9 @@ def get_protection_message(chat_id, target_id):
 
 
 def handle_ban(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
-        send_message(chat_id, "Kisi ke message pe reply karke /ban likho!")
+        send_message(chat_id, "Kisi ke message pe reply karke /ban likho, ya /ban naam likho!")
         return
     protection = get_protection_message(chat_id, target['id'])
     if protection:
@@ -850,9 +887,9 @@ def handle_ban(chat_id, message):
 
 
 def handle_kick(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
-        send_message(chat_id, "Kisi ke message pe reply karke /kick likho!")
+        send_message(chat_id, "Kisi ke message pe reply karke /kick likho, ya /kick naam likho!")
         return
     protection = get_protection_message(chat_id, target['id'])
     if protection:
@@ -862,18 +899,18 @@ def handle_kick(chat_id, message):
 
 
 def handle_unban(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
-        send_message(chat_id, "Kisi ke message pe reply karke /unban likho!")
+        send_message(chat_id, "Kisi ke message pe reply karke /unban likho, ya /unban naam likho!")
         return
     requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target['id'], "only_if_banned": True}, timeout=10)
     send_message(chat_id, get_name(target) + " ka ban hata diya.")
 
 
 def handle_mute(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
-        send_message(chat_id, "Kisi ke message pe reply karke /mute likho!")
+        send_message(chat_id, "Kisi ke message pe reply karke /mute likho, ya /mute naam likho!")
         return
     protection = get_protection_message(chat_id, target['id'])
     if protection:
@@ -883,17 +920,17 @@ def handle_mute(chat_id, message):
 
 
 def handle_unmute(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
-        send_message(chat_id, "Kisi ke message pe reply karke /unmute likho!")
+        send_message(chat_id, "Kisi ke message pe reply karke /unmute likho, ya /unmute naam likho!")
         return
     moderation_action_and_notify("unmute", chat_id, target['id'], get_name(target), chat_id)
 
 
 def handle_warn(chat_id, message):
-    target = get_target_user(message)
+    target = get_target_user(chat_id, message)
     if not target:
-        send_message(chat_id, "Kisi ke message pe reply karke /warn likho!")
+        send_message(chat_id, "Kisi ke message pe reply karke /warn likho, ya /warn naam likho!")
         return
     protection = get_protection_message(chat_id, target['id'])
     if protection:
@@ -1220,39 +1257,50 @@ REALISTIC_KEYWORDS = ["realistic photo", "real photo", "landscape", "nature phot
 
 def generate_image(prompt, style_reference=None, reference_info=None):
     """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye.
-    Ek model fail ho to agla try karta hai, taaki bot kabhi bhi bina koshish kiye haar na maane."""
+    Ek model/endpoint fail ho (chahe error status ho ya timeout/exception) to agla try karta hai,
+    taaki bot kabhi bhi bina koshish kiye haar na maane."""
+    reference_lower = (style_reference or prompt).lower()
+    is_realistic = any(k in reference_lower for k in REALISTIC_KEYWORDS)
+    # nanobanana (Google ka Nano Banana model, Pollinations ke through free) characters/anime ke liye
+    # sabse accurate hai, realistic photos ke liye flux use karte hain
+    primary_model = "flux" if is_realistic else "nanobanana"
+    models_to_try = [primary_model]
+    for backup in ["flux", "zimage", "turbo"]:
+        if backup not in models_to_try:
+            models_to_try.append(backup)
+
+    full_prompt = prompt
+    if reference_info:
+        full_prompt = full_prompt + ", " + reference_info
+    if not is_realistic:
+        full_prompt = full_prompt + ", accurate official character design, correct hair color and outfit, anime art style, high detail"
+
     try:
-        reference_lower = (style_reference or prompt).lower()
-        is_realistic = any(k in reference_lower for k in REALISTIC_KEYWORDS)
-        # nanobanana (Google ka Nano Banana model, Pollinations ke through free) characters/anime ke liye
-        # sabse accurate hai, realistic photos ke liye flux use karte hain
-        primary_model = "flux" if is_realistic else "nanobanana"
-        models_to_try = [primary_model]
-        for backup in ["flux", "turbo"]:
-            if backup not in models_to_try:
-                models_to_try.append(backup)
-
-        full_prompt = prompt
-        if reference_info:
-            full_prompt = full_prompt + ", " + reference_info
-        if not is_realistic:
-            full_prompt = full_prompt + ", accurate official character design, correct hair color and outfit, anime art style, high detail"
-
         encoded_prompt = requests.utils.quote(full_prompt[:800])
-        url = "https://image.pollinations.ai/prompt/" + encoded_prompt
-
-        for model in models_to_try:
-            params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
-            r = requests.get(url, params=params, timeout=60)
-            if r.status_code == 200 and r.content and len(r.content) > 500:
-                return r.content
-            print("IMAGE GEN ERROR (status " + str(r.status_code) + ", model=" + model + "), content length: " + str(len(r.content) if r.content else 0) + " - trying next model")
-
-        print("IMAGE GEN: sab models fail ho gaye (" + ", ".join(models_to_try) + ")")
-        return None
     except Exception as e:
-        print("IMAGE GEN EXCEPTION: " + str(e))
+        print("IMAGE GEN PROMPT ENCODE EXCEPTION: " + str(e))
         return None
+
+    # naya unified endpoint pehle, purana legacy endpoint backup ki tarah (agar naya kabhi down ho)
+    endpoints = [
+        "https://gen.pollinations.ai/image/" + encoded_prompt,
+        "https://image.pollinations.ai/prompt/" + encoded_prompt,
+    ]
+
+    for endpoint_url in endpoints:
+        for model in models_to_try:
+            try:
+                params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
+                r = requests.get(endpoint_url, params=params, timeout=60)
+                if r.status_code == 200 and r.content and len(r.content) > 500:
+                    return r.content
+                print("IMAGE GEN ERROR (status " + str(r.status_code) + ", model=" + model + ", endpoint=" + endpoint_url + "), content length: " + str(len(r.content) if r.content else 0) + " - trying next")
+            except Exception as e:
+                print("IMAGE GEN EXCEPTION (model=" + model + ", endpoint=" + endpoint_url + "): " + str(e) + " - trying next")
+                continue
+
+    print("IMAGE GEN: sab models aur endpoints fail ho gaye")
+    return None
 
 
 def handle_image_request(chat_id, message_id, image_prompt, style_reference):
