@@ -196,6 +196,21 @@ def remember_user(chat_id, from_user):
         known_users[chat_id][full_name.lower()] = {"id": uid, "name": full_name}
 
 
+def matches_real_member(chat_id, image_prompt):
+    """Check karta hai ki image prompt mein kisi asli group member ka naam to nahi hai -
+    taaki real logon ki fake photo na bane."""
+    chat_users = known_users.get(chat_id, {})
+    if not chat_users:
+        return None
+    prompt_lower = image_prompt.lower()
+    for name_key, info in chat_users.items():
+        if len(name_key) < 3:
+            continue  # bahut chhote naam (jaise 2-letter) false-positive dete hain
+        if re.search(r'\b' + re.escape(name_key) + r'\b', prompt_lower):
+            return info["name"]
+    return None
+
+
 def is_owner(user_id):
     if not OWNER_ID:
         return False
@@ -498,7 +513,30 @@ def handle_message(message):
             if not image_prompt:
                 image_prompt = "something creative and fun"
 
+            real_member = matches_real_member(chat_id, image_prompt)
+            if real_member:
+                safe_run(send_message, chat_id, real_member + " ka photo nahi bana sakta, kisi real insaan ki photo generate nahi karte hum. Kisi fictional character ya cheez ka bolo!", message_id)
+                return
+
             safe_run(handle_image_request, chat_id, message_id, image_prompt, style_reference)
+            return
+
+        # Agar reply kisi photo pe hai, ya khud is message mein photo hai, to use dekhkar jawab do
+        photo_to_analyze = None
+        if reply_to and reply_to.get('photo'):
+            photo_to_analyze = reply_to['photo'][-1]['file_id']
+        elif message.get('photo'):
+            photo_to_analyze = message['photo'][-1]['file_id']
+
+        if photo_to_analyze:
+            photo_bytes = get_telegram_file_bytes(photo_to_analyze)
+            vision_reply = None
+            if photo_bytes:
+                vision_reply = analyze_photo_with_question(photo_bytes, user_text)
+            if vision_reply:
+                safe_run(send_message, chat_id, vision_reply, message_id)
+            else:
+                safe_run(send_message, chat_id, "Abhi photo dekh nahi pa raha yaar, dobara try karo.", message_id)
             return
 
         if reply_to:
@@ -1396,6 +1434,56 @@ def pcm_to_wav_bytes(pcm_bytes, channels=1, rate=24000, sample_width=2):
         wf.setframerate(rate)
         wf.writeframes(pcm_bytes)
     return buf.getvalue()
+
+
+def get_telegram_file_bytes(file_id):
+    """Telegram pe upload hui koi bhi photo/file download karta hai."""
+    try:
+        r = requests.post(TELEGRAM_URL + "/getFile", json={"file_id": file_id}, timeout=15)
+        data = r.json()
+        file_path = data.get("result", {}).get("file_path")
+        if not file_path:
+            print("GET FILE ERROR: file_path nahi mila - " + str(data))
+            return None
+        file_url = "https://api.telegram.org/file/bot" + str(TELEGRAM_TOKEN) + "/" + file_path
+        fr = requests.get(file_url, timeout=30)
+        if fr.status_code == 200 and fr.content:
+            return fr.content
+        return None
+    except Exception as e:
+        print("GET FILE EXCEPTION: " + str(e))
+        return None
+
+
+def analyze_photo_with_question(image_bytes, question):
+    """Gemini ki vision capability se photo ko dekhkar sawaal ka jawab deta hai."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+        b64_image = base64.b64encode(image_bytes).decode()
+        prompt_text = SYSTEM_PROMPT + "\n\nYe image dhyan se dekho, jo bhi usme dikh raha hai (log, cheezein, expressions, text) sab samjho, phir is sawaal/comment ka seedha relevant jawab do: " + question
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}},
+                    {"text": prompt_text}
+                ]
+            }]
+        }
+        r = requests.post(url, json=payload, headers=headers, timeout=30)
+        data = r.json()
+        candidates = data.get("candidates")
+        if not candidates:
+            print("PHOTO ANALYSIS ERROR (status " + str(r.status_code) + "): " + str(data))
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return text or None
+    except Exception as e:
+        print("PHOTO ANALYSIS EXCEPTION: " + str(e))
+        return None
 
 
 def generate_tts(text):
