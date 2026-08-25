@@ -1299,19 +1299,12 @@ REALISTIC_KEYWORDS = ["realistic photo", "real photo", "landscape", "nature phot
 
 
 def generate_image(prompt, style_reference=None, reference_info=None):
-    """Pollinations.ai se image banata hai - free hai, koi API key ya billing nahi chahiye.
-    Ek model/endpoint fail ho (chahe error status ho ya timeout/exception) to agla try karta hai,
-    taaki bot kabhi bhi bina koshish kiye haar na maane."""
+    """Pollinations.ai se image banata hai. 'flux' hi genuinely free model hai (baaki jaise
+    nanobanana/zimage/turbo ko paid Pollen credits chahiye, isliye unse 402 error aata hai) -
+    isliye style ab sirf prompt engineering se control hota hai, model 'flux' hi fixed rakha hai."""
     reference_lower = (style_reference or prompt).lower()
     is_anime = any(k in reference_lower for k in ANIME_KEYWORDS)
-    # Sirf anime keywords (character/genre naam) hone par hi anime style force hoga - warna
-    # default neutral/realistic rahega, taaki real logon (netaa, celebrity wagera) ki photo
-    # bina wajah anime na ban jaaye.
-    primary_model = "nanobanana" if is_anime else "flux"
-    models_to_try = [primary_model]
-    for backup in ["flux", "zimage", "turbo"]:
-        if backup not in models_to_try:
-            models_to_try.append(backup)
+    models_to_try = ["flux"]
 
     full_prompt = prompt
     if reference_info:
