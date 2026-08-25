@@ -8,6 +8,7 @@ import random
 import base64
 import io
 import wave
+import threading
 
 app = Flask(__name__)
 
@@ -256,18 +257,21 @@ def webhook():
             return {"ok": True}
         print("UPDATE AAYA: " + str(data))
 
+        # Har update background thread mein process hota hai, taaki ek slow operation
+        # (jaise image generation, TTS, web search) baaki messages ko block na kare -
+        # bot turant Telegram ko "ok" bol deta hai aur processing alag se chalti rehti hai.
         if 'callback_query' in data:
-            safe_run(handle_callback, data['callback_query'])
+            threading.Thread(target=safe_run, args=(handle_callback, data['callback_query'])).start()
             return {"ok": True}
 
         if 'chat_member' in data:
-            safe_run(handle_chat_member_update, data['chat_member'])
+            threading.Thread(target=safe_run, args=(handle_chat_member_update, data['chat_member'])).start()
             return {"ok": True}
 
         if 'message' not in data:
             return {"ok": True}
 
-        handle_message(data['message'])
+        threading.Thread(target=safe_run, args=(handle_message, data['message'])).start()
         return {"ok": True}
     except Exception as e:
         print("WEBHOOK CRASH BACHAYA: " + str(e))
@@ -1261,10 +1265,11 @@ def generate_image(prompt, style_reference=None, reference_info=None):
     Ek model/endpoint fail ho (chahe error status ho ya timeout/exception) to agla try karta hai,
     taaki bot kabhi bhi bina koshish kiye haar na maane."""
     reference_lower = (style_reference or prompt).lower()
-    is_realistic = any(k in reference_lower for k in REALISTIC_KEYWORDS)
-    # nanobanana (Google ka Nano Banana model, Pollinations ke through free) characters/anime ke liye
-    # sabse accurate hai, realistic photos ke liye flux use karte hain
-    primary_model = "flux" if is_realistic else "nanobanana"
+    is_anime = any(k in reference_lower for k in ANIME_KEYWORDS)
+    # Sirf anime keywords (character/genre naam) hone par hi anime style force hoga - warna
+    # default neutral/realistic rahega, taaki real logon (netaa, celebrity wagera) ki photo
+    # bina wajah anime na ban jaaye.
+    primary_model = "nanobanana" if is_anime else "flux"
     models_to_try = [primary_model]
     for backup in ["flux", "zimage", "turbo"]:
         if backup not in models_to_try:
@@ -1273,8 +1278,10 @@ def generate_image(prompt, style_reference=None, reference_info=None):
     full_prompt = prompt
     if reference_info:
         full_prompt = full_prompt + ", " + reference_info
-    if not is_realistic:
+    if is_anime:
         full_prompt = full_prompt + ", accurate official character design, correct hair color and outfit, anime art style, high detail"
+    else:
+        full_prompt = full_prompt + ", accurate, realistic, high detail"
 
     try:
         encoded_prompt = requests.utils.quote(full_prompt[:800])
@@ -1466,4 +1473,4 @@ def home():
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, threaded=True)
