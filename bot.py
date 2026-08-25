@@ -14,6 +14,7 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
 
@@ -1291,7 +1292,11 @@ def generate_image(prompt, style_reference=None, reference_info=None):
         for model in models_to_try:
             try:
                 params = {"width": 1024, "height": 1024, "nologo": "true", "model": model, "enhance": "true"}
-                r = requests.get(endpoint_url, params=params, timeout=60)
+                headers = {}
+                if POLLINATIONS_API_KEY:
+                    headers["Authorization"] = "Bearer " + POLLINATIONS_API_KEY
+                    params["key"] = POLLINATIONS_API_KEY
+                r = requests.get(endpoint_url, params=params, headers=headers, timeout=60)
                 if r.status_code == 200 and r.content and len(r.content) > 500:
                     return r.content
                 print("IMAGE GEN ERROR (status " + str(r.status_code) + ", model=" + model + ", endpoint=" + endpoint_url + "), content length: " + str(len(r.content) if r.content else 0) + " - trying next")
