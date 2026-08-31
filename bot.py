@@ -455,10 +455,9 @@ def handle_message(message):
     if cmd == '/help':
         safe_run(send_message, chat_id, HELP_TEXT())
         return
-    MOD_COMMANDS = ('/ban', '/kick', '/unban', '/mute', '/unmute', '/warn', '/pin')
-    if cmd in MOD_COMMANDS:
-        if not (is_owner(user_id) or safe_check_admin(chat_id, user_id)):
-            safe_run(send_message, chat_id, "Ye command sirf Admin ya Owner use kar sakte hain.", message_id)
+    if cmd in COMMAND_PERMISSION:
+        if not has_permission(chat_id, user_id, COMMAND_PERMISSION[cmd]):
+            safe_run(send_message, chat_id, "Tumhe ye command use karne ki permission nahi hai.", message_id)
             return
 
     if cmd == '/ban':
@@ -577,6 +576,49 @@ def safe_check_admin(chat_id, user_id):
     except Exception as e:
         print("ADMIN CHECK ERROR: " + str(e))
         return False
+
+
+def get_chat_member_info(chat_id, user_id):
+    """Telegram se member ka status aur (agar admin hai to) uski specific permissions
+    (can_restrict_members, can_pin_messages, etc.) nikalta hai."""
+    try:
+        r = requests.get(TELEGRAM_URL + "/getChatMember", params={"chat_id": chat_id, "user_id": user_id}, timeout=10)
+        return r.json().get('result', {})
+    except Exception as e:
+        print("MEMBER INFO ERROR: " + str(e))
+        return {}
+
+
+def has_permission(chat_id, user_id, permission_key):
+    """
+    Bilkul Rose bot jaisa granular permission check:
+    - Owner (OWNER_ID) hamesha allowed.
+    - Group ka creator hamesha allowed.
+    - Normal admin sirf tabhi allowed jab usko wo specific permission
+      (jaise can_restrict_members ya can_pin_messages) di gayi ho.
+    - Non-admin kabhi allowed nahi.
+    """
+    if is_owner(user_id):
+        return True
+    info = get_chat_member_info(chat_id, user_id)
+    status = info.get('status', '')
+    if status == 'creator':
+        return True
+    if status == 'administrator':
+        return bool(info.get(permission_key, False))
+    return False
+
+
+# Har moderation command ke liye Telegram ka corresponding admin-permission field.
+COMMAND_PERMISSION = {
+    '/ban': 'can_restrict_members',
+    '/kick': 'can_restrict_members',
+    '/unban': 'can_restrict_members',
+    '/mute': 'can_restrict_members',
+    '/unmute': 'can_restrict_members',
+    '/warn': 'can_restrict_members',
+    '/pin': 'can_pin_messages',
+}
 
 
 # ==================== REPORT ====================
