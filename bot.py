@@ -455,6 +455,12 @@ def handle_message(message):
     if cmd == '/help':
         safe_run(send_message, chat_id, HELP_TEXT())
         return
+    MOD_COMMANDS = ('/ban', '/kick', '/unban', '/mute', '/unmute', '/warn', '/pin')
+    if cmd in MOD_COMMANDS:
+        if not (is_owner(user_id) or safe_check_admin(chat_id, user_id)):
+            safe_run(send_message, chat_id, "Ye command sirf Admin ya Owner use kar sakte hain.", message_id)
+            return
+
     if cmd == '/ban':
         safe_run(handle_ban, chat_id, message)
         return
