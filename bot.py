@@ -15,6 +15,8 @@ app = Flask(__name__)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
@@ -1098,7 +1100,7 @@ RETRY_WAIT_PATTERN = re.compile(r'try again in ([0-9.]+)s', re.IGNORECASE)
 # message turant doosre backup (ya friendly fallback) pe chala jaaye -
 # koi lambi retry-wait nahi hogi.
 # ---------------------------------------------------------------------------
-AI_OUTAGE_UNTIL = {"groq": 0.0, "gemini": 0.0}
+AI_OUTAGE_UNTIL = {"groq": 0.0, "gemini": 0.0, "openrouter": 0.0}
 DAILY_QUOTA_COOLDOWN = 600  # 10 minute - itni der baad khud-ba-khud dobara try karega
 
 
@@ -1156,6 +1158,45 @@ def call_groq(payload, timeout=20, max_retries=1):
             time.sleep(wait_time)
             attempt += 1
             continue
+
+        return r, data
+
+
+def call_openrouter(payload, timeout=20, max_retries=1):
+    """OpenRouter ko call karta hai - ye TEESRA aur FREE fallback hai, jab Groq aur Gemini
+    dono ka quota khatam ho jaaye tab ye chalta hai. OpenRouter ke ':free' models bilkul
+    muft hain, koi card nahi chahiye."""
+    if not OPENROUTER_API_KEY:
+        return None, {"error": {"message": "OPENROUTER_API_KEY set nahi hai"}}
+    if is_ai_down("openrouter"):
+        return None, {"error": {"message": "openrouter temporarily skipped (daily quota cooldown)", "code": "rate_limit_exceeded"}}
+
+    headers = {"Authorization": "Bearer " + str(OPENROUTER_API_KEY)}
+    body = dict(payload)
+    body["model"] = OPENROUTER_MODEL
+    attempt = 0
+    while True:
+        r = requests.post("https://openrouter.ai/api/v1/chat/completions", json=body, headers=headers, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        if "choices" in data:
+            return r, data
+
+        err = data.get("error", {})
+        is_rate_limit = (r.status_code == 429) or (str(err.get("code", "")) == "429")
+
+        if is_rate_limit and attempt < max_retries:
+            wait_time = 5.0
+            print("OPENROUTER RATE LIMIT HIT, waiting " + str(wait_time) + "s then retrying")
+            time.sleep(wait_time)
+            attempt += 1
+            continue
+
+        if is_rate_limit:
+            mark_ai_down("openrouter")
 
         return r, data
 
@@ -1340,11 +1381,19 @@ def get_ai_reply(user_id, user_text):
 
             if not reply_text:
                 print("GEMINI BACKUP ALSO FAILED: " + str(gemini_data))
-                err_code = res_json.get("error", {}).get("code", "")
-                is_429 = (res is not None and res.status_code == 429)
-                if err_code == "rate_limit_exceeded" or is_429:
-                    return "Arre thoda ruk yaar, bahut load hai abhi. Thodi der baad phir try karo bhai 🙏"
-                return "Arre yaar, dimaag hang ho gaya"
+                # Teesra fallback: OpenRouter (free model)
+                openrouter_payload = {"messages": messages_for_ai}
+                _, openrouter_data = call_openrouter(openrouter_payload, timeout=20)
+                if "choices" in openrouter_data:
+                    reply_text = openrouter_data["choices"][0]["message"]["content"]
+
+                if not reply_text:
+                    print("OPENROUTER BACKUP ALSO FAILED: " + str(openrouter_data))
+                    err_code = res_json.get("error", {}).get("code", "")
+                    is_429 = (res is not None and res.status_code == 429)
+                    if err_code == "rate_limit_exceeded" or is_429:
+                        return "Arre thoda ruk yaar, bahut load hai abhi. Thodi der baad phir try karo bhai 🙏"
+                    return "Arre yaar, dimaag hang ho gaya"
 
         now = time.time()
         history.append({"role": "user", "content": user_text, "time": now})
