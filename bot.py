@@ -1088,9 +1088,47 @@ GENERAL_KNOWLEDGE_PATTERN = re.compile(
 RETRY_WAIT_PATTERN = re.compile(r'try again in ([0-9.]+)s', re.IGNORECASE)
 
 
+# ---------------------------------------------------------------------------
+# CIRCUIT BREAKER: jab Groq/Gemini ka DAILY quota khatam ho jaata hai, to wo
+# error der tak (kabhi kabhi ghanto) rehta hai. Pehle bot har message pe dono
+# API ko dobara-dobara try karta tha (5-15s sleep ke saath retry), jisse
+# request bahut slow ho jaati thi aur Render par woh timeout/hang ho ke
+# "crash" jaisa lagta tha. Ab jaise hi daily-quota-exceeded pakda jaata hai,
+# uss provider ko kuch der ke liye "down" mark kar dete hain taaki agla
+# message turant doosre backup (ya friendly fallback) pe chala jaaye -
+# koi lambi retry-wait nahi hogi.
+# ---------------------------------------------------------------------------
+AI_OUTAGE_UNTIL = {"groq": 0.0, "gemini": 0.0}
+DAILY_QUOTA_COOLDOWN = 600  # 10 minute - itni der baad khud-ba-khud dobara try karega
+
+
+def mark_ai_down(provider, seconds=DAILY_QUOTA_COOLDOWN):
+    AI_OUTAGE_UNTIL[provider] = time.time() + seconds
+    print(provider.upper() + " marked DOWN for " + str(seconds) + "s (daily quota exceeded)")
+
+
+def is_ai_down(provider):
+    return time.time() < AI_OUTAGE_UNTIL.get(provider, 0.0)
+
+
+def is_daily_quota_error(provider, err):
+    """Ye batata hai ki error 'daily/TPD quota khatam' type hai (jise turant retry karne
+    se koi fayda nahi) ya sirf chhota transient rate-limit hai (jise retry karna theek hai)."""
+    msg = str(err).lower()
+    if provider == "groq":
+        return "tpd" in msg or "per day" in msg or "tokens per day" in msg
+    if provider == "gemini":
+        return "perday" in msg.replace(" ", "").lower() or "requestsperday" in msg.replace(" ", "").lower()
+    return False
+
+
 def call_groq(payload, timeout=20, max_retries=1):
     """Groq ko call karta hai. Agar 429 rate-limit aaye to Groq ke bataye wait-time tak rukke
-    khud-ba-khud retry karta hai, taaki user ko error na dikhe."""
+    khud-ba-khud retry karta hai, taaki user ko error na dikhe. Agar quota DAILY khatam ho
+    chuki hai to retry nahi karta - seedha outage mark karke turant return karta hai."""
+    if is_ai_down("groq"):
+        return None, {"error": {"message": "groq temporarily skipped (daily quota cooldown)", "code": "rate_limit_exceeded"}}
+
     headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
     attempt = 0
     while True:
@@ -1105,6 +1143,10 @@ def call_groq(payload, timeout=20, max_retries=1):
 
         err = data.get("error", {})
         is_rate_limit = (r.status_code == 429) or (err.get("code") == "rate_limit_exceeded")
+
+        if is_rate_limit and is_daily_quota_error("groq", err.get("message", "")):
+            mark_ai_down("groq")
+            return r, data
 
         if is_rate_limit and attempt < max_retries:
             wait_match = RETRY_WAIT_PATTERN.search(err.get("message", ""))
@@ -1133,9 +1175,13 @@ def to_gemini_contents(messages):
 
 
 def call_gemini(payload, timeout=20, max_retries=1):
-    """Gemini ko call karta hai. 429 aane pe thoda wait karke ek baar retry karta hai."""
+    """Gemini ko call karta hai. 429 aane pe thoda wait karke ek baar retry karta hai.
+    Agar quota DAILY khatam ho chuki hai to retry nahi karta - turant outage mark karta hai."""
     if not GEMINI_API_KEY:
         return None, {"error": {"message": "GEMINI_API_KEY set nahi hai"}}
+    if is_ai_down("gemini"):
+        return None, {"error": {"status": "RESOURCE_EXHAUSTED", "message": "gemini temporarily skipped (daily quota cooldown)"}}
+
     url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     attempt = 0
@@ -1151,6 +1197,10 @@ def call_gemini(payload, timeout=20, max_retries=1):
 
         err = data.get("error", {})
         is_rate_limit = (r.status_code == 429) or (err.get("status") == "RESOURCE_EXHAUSTED")
+
+        if is_rate_limit and is_daily_quota_error("gemini", data):
+            mark_ai_down("gemini")
+            return r, data
 
         if is_rate_limit and attempt < max_retries:
             wait_time = 5.0
@@ -1218,7 +1268,8 @@ def fetch_web_info(query):
         }
         r, data = call_groq(payload, timeout=20)
         if "choices" not in data:
-            print("GROQ WEB INFO BACKUP ALSO FAILED (status " + str(r.status_code) + "): " + str(data))
+            groq_status = r.status_code if r is not None else "skipped"
+            print("GROQ WEB INFO BACKUP ALSO FAILED (status " + str(groq_status) + "): " + str(data))
             return None
         info = data["choices"][0]["message"]["content"]
         if info and len(info) > 600:
@@ -1277,7 +1328,8 @@ def get_ai_reply(user_id, user_text):
         if "choices" in res_json:
             reply_text = res_json["choices"][0]["message"]["content"]
         else:
-            print("GROQ CHAT FAILED (status " + str(res.status_code) + "): " + str(res_json) + " -- trying Gemini backup")
+            groq_status = res.status_code if res is not None else "skipped"
+            print("GROQ CHAT FAILED (status " + str(groq_status) + "): " + str(res_json) + " -- trying Gemini backup")
             # Backup: Gemini se persona reply
             system_text, gemini_contents = to_gemini_contents(messages_for_ai)
             gemini_payload = {"contents": gemini_contents}
@@ -1289,8 +1341,9 @@ def get_ai_reply(user_id, user_text):
             if not reply_text:
                 print("GEMINI BACKUP ALSO FAILED: " + str(gemini_data))
                 err_code = res_json.get("error", {}).get("code", "")
-                if err_code == "rate_limit_exceeded" or res.status_code == 429:
-                    return "Arre thoda ruk yaar, bahut load hai abhi. 1 min baad phir try karo."
+                is_429 = (res is not None and res.status_code == 429)
+                if err_code == "rate_limit_exceeded" or is_429:
+                    return "Arre thoda ruk yaar, bahut load hai abhi. Thodi der baad phir try karo bhai 🙏"
                 return "Arre yaar, dimaag hang ho gaya"
 
         now = time.time()
