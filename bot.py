@@ -16,10 +16,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
+MAIN_GROUP_ID = os.environ.get("MAIN_GROUP_ID")
+MAIN_GROUP_LINK = os.environ.get("MAIN_GROUP_LINK", "")
 
 TELEGRAM_URL = "https://api.telegram.org/bot" + str(TELEGRAM_TOKEN)
 
@@ -51,7 +53,7 @@ Zaroori niyam:
 - Jawab ki length sawaal ke hisaab se rakho - chhoti baat ka chhota jawab, thodi detail wali baat ka thoda bada jawab (2 line tak). Har baar sirf "haan" ya "na" jaisa ek-shabd wala jawab mat do jab tak sawaal khud sirf haan/na ka na ho - forced ek-shabd replies ajeeb aur robotic lagte hain, jaise real insaan baat kar hi nahi raha.
 - Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to uska SAHI aur ASLI jawab do."""
 
-DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
+DEFAULT_WELCOME = "Hey {name}, Welcome to {group}!"
 
 WELCOME_EXTRAS = [
     "Kaise ho bhai, mast raho!",
@@ -76,9 +78,9 @@ def mention_html(user_id, name):
     return '<a href="tg://user?id=' + str(user_id) + '">' + escape_html(name) + '</a>'
 
 
-def build_welcome_message(settings, user_id, name):
+def build_welcome_message(settings, user_id, name, group_name="is group"):
     mention = mention_html(user_id, name)
-    base = settings.get('welcome', DEFAULT_WELCOME).replace("{name}", mention)
+    base = settings.get('welcome', DEFAULT_WELCOME).replace("{name}", mention).replace("{group}", escape_html(group_name))
     extra = random.choice(WELCOME_EXTRAS)
     return base + "\n" + extra
 
@@ -386,7 +388,8 @@ def handle_message(message):
             if already_announced(chat_id, member.get('id'), "join"):
                 continue
             name = member.get('first_name', 'dost')
-            welcome_text = build_welcome_message(settings, member.get('id'), name)
+            group_name = chat.get('title', 'is group')
+            welcome_text = build_welcome_message(settings, member.get('id'), name, group_name)
             safe_run(send_message, chat_id, welcome_text, None, "HTML")
         return
 
@@ -512,6 +515,15 @@ def handle_message(message):
     should_reply = is_reply_to_bot or khan_called
 
     if should_reply:
+        # Agar bot humare MAIN group ke alawa kisi doosre group mein hai, to sirf unhi
+        # logo se baat karega jo humare main group ke member hain.
+        if MAIN_GROUP_ID and str(chat_id) != str(MAIN_GROUP_ID) and not is_member_of_main_group(user_id):
+            join_msg = "Pehle hamara group join karo bhai, tabhi mujhse baat kar paoge! 🙏"
+            if MAIN_GROUP_LINK:
+                join_msg += "\n👉 " + MAIN_GROUP_LINK
+            safe_run(send_message, chat_id, join_msg, message_id)
+            return
+
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
 
         if wants_image(user_text):
@@ -606,6 +618,23 @@ def safe_check_admin(chat_id, user_id):
     except Exception as e:
         print("ADMIN CHECK ERROR: " + str(e))
         return False
+
+
+def is_member_of_main_group(user_id):
+    """Check karta hai ki user humare MAIN group (MAIN_GROUP_ID) ka member hai ya nahi.
+    Isse Khan sirf unhi logo se baat karega jo humare main group mein hain - chahe wo
+    kisi bhi doosre group mein ho jahan bot bhi add hai. Agar MAIN_GROUP_ID hi set
+    nahi hai to sabko allow kar dete hain (fail-open, taaki galti se sab band na ho)."""
+    if not MAIN_GROUP_ID:
+        return True
+    try:
+        r = requests.get(TELEGRAM_URL + "/getChatMember", params={"chat_id": MAIN_GROUP_ID, "user_id": user_id}, timeout=10)
+        result = r.json().get('result', {})
+        status = result.get('status', '')
+        return status in ('member', 'administrator', 'creator', 'restricted')
+    except Exception as e:
+        print("MAIN GROUP MEMBERSHIP CHECK ERROR: " + str(e))
+        return True  # API fail ho jaaye to sabko block mat karo, fail-open raho
 
 
 def get_chat_member_info(chat_id, user_id):
