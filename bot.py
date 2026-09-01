@@ -16,7 +16,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-oss-20b:free")
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
@@ -1187,6 +1187,12 @@ def call_openrouter(payload, timeout=20, max_retries=1):
 
         err = data.get("error", {})
         is_rate_limit = (r.status_code == 429) or (str(err.get("code", "")) == "429")
+        is_model_unavailable = (r.status_code == 404) or (str(err.get("code", "")) == "404")
+
+        if is_model_unavailable:
+            print("OPENROUTER MODEL UNAVAILABLE: " + str(err.get("message", "")))
+            mark_ai_down("openrouter", 3600)  # 1 hour - taaki galat model se baar baar wasted calls na ho
+            return r, data
 
         if is_rate_limit and attempt < max_retries:
             wait_time = 5.0
