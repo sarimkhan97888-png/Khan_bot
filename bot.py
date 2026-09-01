@@ -455,6 +455,9 @@ def handle_message(message):
     if cmd == '/help':
         safe_run(send_message, chat_id, HELP_TEXT())
         return
+    if cmd == '/rule' or cmd == '/rules':
+        safe_run(send_message, chat_id, RULES_TEXT(), None, "HTML")
+        return
     if cmd in COMMAND_PERMISSION:
         if not has_permission(chat_id, user_id, COMMAND_PERMISSION[cmd]):
             safe_run(send_message, chat_id, "Tumhe ye command use karne ki permission nahi hai.", message_id)
@@ -564,7 +567,32 @@ def handle_message(message):
 
 
 def HELP_TEXT():
-    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin (reply karke):\n/ban /kick /unban /mute /unmute /warn /pin\n/report - shikayat bhejo\n\nSettings:\n/setwelcome /linkson /linksoff\n\n/help - ye list"
+    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin (reply karke):\n/ban /kick /unban /mute /unmute /warn /pin\n/report - shikayat bhejo\n\nGroup:\n/rule - group ke rules dekho\n\nSettings:\n/setwelcome /linkson /linksoff\n\n/help - ye list"
+
+
+def RULES_TEXT():
+    return (
+        "🌟 ═══════════════════ 🌟\n"
+        "      📜 <b>GROUP RULES</b> 📜\n"
+        "🌟 ═══════════════════ 🌟\n\n"
+        "1️⃣ 😊 <b>Stay Positive</b>\n"
+        "     No hate, abuse, or negativity.\n\n"
+        "2️⃣ 🚫 <b>No Promotion</b>\n"
+        "     Don't advertise channels, groups, links, or products.\n\n"
+        "3️⃣ 🔞 <b>No Bad GIFs/Media</b>\n"
+        "     No inappropriate GIFs, stickers, or content.\n\n"
+        "4️⃣ 🤝 <b>Be Friendly</b>\n"
+        "     Talk respectfully with everyone.\n\n"
+        "5️⃣ 🔇 <b>No Spamming</b>\n"
+        "     Avoid repeated messages or flooding the chat.\n\n"
+        "6️⃣ 🎯 <b>Stay On Topic</b>\n"
+        "     Avoid unnecessary arguments or fights.\n\n"
+        "7️⃣ 👮 <b>Respect Admins</b>\n"
+        "     Follow admin instructions at all times.\n\n"
+        "🌟 ═══════════════════ 🌟\n"
+        "⚠️ Breaking rules = ⚠️ Warn ➡️ 🔇 Mute ➡️ 🚫 Ban\n\n"
+        "💖 Enjoy the group! Let's keep it fun for everyone! 🎉✨"
+    )
 
 
 def safe_check_admin(chat_id, user_id):
