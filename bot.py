@@ -17,6 +17,14 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
+MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
+MISTRAL_MODEL = os.environ.get("MISTRAL_MODEL", "mistral-small-latest")
+CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY")
+CEREBRAS_MODEL = os.environ.get("CEREBRAS_MODEL", "llama-3.3-70b")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
+NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct")
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
@@ -540,6 +548,7 @@ def handle_message(message):
                 safe_run(send_message, chat_id, real_member + " ka photo nahi bana sakta, kisi real insaan ki photo generate nahi karte hum. Kisi fictional character ya cheez ka bolo!", message_id)
                 return
 
+            safe_run(send_typing_action, chat_id, "upload_photo")
             safe_run(handle_image_request, chat_id, message_id, image_prompt, style_reference)
             return
 
@@ -551,6 +560,7 @@ def handle_message(message):
             photo_to_analyze = message['photo'][-1]['file_id']
 
         if photo_to_analyze:
+            safe_run(send_typing_action, chat_id, "typing")
             photo_bytes = get_telegram_file_bytes(photo_to_analyze)
             vision_reply = None
             if photo_bytes:
@@ -568,9 +578,12 @@ def handle_message(message):
                 quoted_name = get_name(quoted_from)
                 user_text = quoted_name + ' ne pehle ye likha tha: "' + quoted_text + '"\nUsi message ke reply mein ye bola gaya: "' + user_text + '"'
 
+        wants_voice_reply = wants_voice(text)
+        safe_run(send_typing_action, chat_id, "record_voice" if wants_voice_reply else "typing")
+
         reply = get_ai_reply(user_id, user_text)
 
-        if wants_voice(text):
+        if wants_voice_reply:
             audio = generate_tts(reply)
             if audio:
                 safe_run(send_voice, chat_id, audio, None, message_id)
@@ -1129,7 +1142,7 @@ RETRY_WAIT_PATTERN = re.compile(r'try again in ([0-9.]+)s', re.IGNORECASE)
 # message turant doosre backup (ya friendly fallback) pe chala jaaye -
 # koi lambi retry-wait nahi hogi.
 # ---------------------------------------------------------------------------
-AI_OUTAGE_UNTIL = {"groq": 0.0, "gemini": 0.0, "openrouter": 0.0}
+AI_OUTAGE_UNTIL = {"groq": 0.0, "gemini": 0.0, "openrouter": 0.0, "mistral": 0.0, "cerebras": 0.0, "deepseek": 0.0, "nvidia": 0.0}
 DAILY_QUOTA_COOLDOWN = 600  # 10 minute - itni der baad khud-ba-khud dobara try karega
 
 
@@ -1189,6 +1202,72 @@ def call_groq(payload, timeout=20, max_retries=1):
             continue
 
         return r, data
+
+
+def call_openai_compatible(provider, url, api_key, model, payload, timeout=20, max_retries=1):
+    """Generic caller for OpenAI-compatible chat APIs (Mistral, Cerebras, etc.) - isse
+    har naye provider ke liye alag function likhna nahi padta, bas URL/key/model badal do."""
+    if not api_key:
+        return None, {"error": {"message": provider.upper() + "_API_KEY set nahi hai"}}
+    if is_ai_down(provider):
+        return None, {"error": {"message": provider + " temporarily skipped (daily quota cooldown)", "code": "rate_limit_exceeded"}}
+
+    headers = {"Authorization": "Bearer " + str(api_key)}
+    body = dict(payload)
+    body["model"] = model
+    attempt = 0
+    while True:
+        r = requests.post(url, json=body, headers=headers, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+
+        if "choices" in data:
+            return r, data
+
+        err = data.get("error", {})
+        if isinstance(err, str):
+            err = {"message": err}
+        is_rate_limit = (r.status_code == 429) or (str(err.get("code", "")) == "429")
+        is_model_unavailable = r.status_code == 404
+
+        if is_model_unavailable:
+            print(provider.upper() + " MODEL UNAVAILABLE: " + str(err.get("message", "")))
+            mark_ai_down(provider, 3600)
+            return r, data
+
+        if is_rate_limit and attempt < max_retries:
+            wait_time = 5.0
+            print(provider.upper() + " RATE LIMIT HIT, waiting " + str(wait_time) + "s then retrying")
+            time.sleep(wait_time)
+            attempt += 1
+            continue
+
+        if is_rate_limit:
+            mark_ai_down(provider)
+
+        return r, data
+
+
+def call_mistral(payload, timeout=20, max_retries=1):
+    """Mistral La Plateforme ka free 'Experiment' tier - CHOUTHA fallback."""
+    return call_openai_compatible("mistral", "https://api.mistral.ai/v1/chat/completions", MISTRAL_API_KEY, MISTRAL_MODEL, payload, timeout, max_retries)
+
+
+def call_cerebras(payload, timeout=20, max_retries=1):
+    """Cerebras Cloud ka free tier (1M tokens/din) - PAANCHVA fallback."""
+    return call_openai_compatible("cerebras", "https://api.cerebras.ai/v1/chat/completions", CEREBRAS_API_KEY, CEREBRAS_MODEL, payload, timeout, max_retries)
+
+
+def call_deepseek(payload, timeout=20, max_retries=1):
+    """DeepSeek ka free sign-up grant (5M tokens, koi card nahi) - CHATHVA fallback."""
+    return call_openai_compatible("deepseek", "https://api.deepseek.com/v1/chat/completions", DEEPSEEK_API_KEY, DEEPSEEK_MODEL, payload, timeout, max_retries)
+
+
+def call_nvidia(payload, timeout=20, max_retries=1):
+    """NVIDIA NIM (build.nvidia.com) ka free tier, koi card nahi - SAATVA fallback."""
+    return call_openai_compatible("nvidia", "https://integrate.api.nvidia.com/v1/chat/completions", NVIDIA_API_KEY, NVIDIA_MODEL, payload, timeout, max_retries)
 
 
 def call_openrouter(payload, timeout=20, max_retries=1):
@@ -1317,9 +1396,11 @@ def needs_web_info(text):
 
 
 def fetch_web_info(query):
-    """Current/factual info nikalta hai. Pehle Gemini (Google Search) try karta hai,
-    agar wo rate-limit ya fail ho jaaye to Groq compound-mini backup ban jaata hai."""
-    # Pehli koshish: Gemini
+    """Current/factual info nikalta hai. Pehle Gemini (Google Search) try karta hai - ye
+    asli real-time search hai. Agar wo fail ho jaaye to Groq/OpenRouter backup ban jaate hain,
+    lekin ye sirf model ki apni training knowledge se jawab dete hain (koi live search nahi) -
+    isliye inka jawab 'confirmed real-time fact' jaisa treat nahi karna chahiye."""
+    # Pehli koshish: Gemini (REAL live Google Search)
     try:
         payload = {
             "contents": [{"parts": [{"text": query}]}],
@@ -1330,7 +1411,7 @@ def fetch_web_info(query):
         if info:
             if len(info) > 600:
                 info = info[:600] + "..."
-            return info
+            return info, True  # True = live search se aaya, pakka sahi hai
         print("GEMINI WEB INFO FAILED, trying Groq backup: " + str(data))
     except Exception as e:
         print("GEMINI WEB INFO EXCEPTION, trying Groq backup: " + str(e))
@@ -1343,17 +1424,30 @@ def fetch_web_info(query):
             "max_completion_tokens": 300
         }
         r, data = call_groq(payload, timeout=20)
-        if "choices" not in data:
-            groq_status = r.status_code if r is not None else "skipped"
-            print("GROQ WEB INFO BACKUP ALSO FAILED (status " + str(groq_status) + "): " + str(data))
-            return None
-        info = data["choices"][0]["message"]["content"]
-        if info and len(info) > 600:
-            info = info[:600] + "..."
-        return info
+        if "choices" in data:
+            info = data["choices"][0]["message"]["content"]
+            if info and len(info) > 600:
+                info = info[:600] + "..."
+            return info, False  # False = live search nahi, model ke apne gyaan se
+        groq_status = r.status_code if r is not None else "skipped"
+        print("GROQ WEB INFO BACKUP ALSO FAILED (status " + str(groq_status) + "): " + str(data))
     except Exception as e:
         print("GROQ WEB INFO BACKUP EXCEPTION: " + str(e))
-        return None
+
+    # Aakhri koshish: OpenRouter se (real-time search nahi, lekin kuch na milne se behtar)
+    try:
+        payload = {"messages": [{"role": "user", "content": query}], "max_tokens": 300}
+        r, data = call_openrouter(payload, timeout=20)
+        if "choices" in data:
+            info = data["choices"][0]["message"]["content"]
+            if info and len(info) > 600:
+                info = info[:600] + "..."
+            return info, False
+        print("OPENROUTER WEB INFO BACKUP ALSO FAILED: " + str(data))
+    except Exception as e:
+        print("OPENROUTER WEB INFO BACKUP EXCEPTION: " + str(e))
+
+    return None, False
 
 
 def get_ai_reply(user_id, user_text):
@@ -1386,11 +1480,15 @@ def get_ai_reply(user_id, user_text):
 
         # sirf jab query ko current/web info chahiye, tabhi alag se search karo
         if needs_web_info(user_text_trimmed):
-            web_info = fetch_web_info(user_text_trimmed)
+            web_info, is_live_search = fetch_web_info(user_text_trimmed)
             if web_info:
+                if is_live_search:
+                    info_note = "Web se ye REAL aur LATEST jaankari mili hai (live Google Search se). Isi info ka use karke user ke sawaal ka SAHI aur ASLI jawab do (Khan ke dost wale 2-line Hinglish andaz mein, thoda mazak bhi jod sakte ho) - lekin jawab mein actual jaankari zaroor honi chahiye, sirf mazak mein mat taal do: "
+                else:
+                    info_note = "Ye jaankari live search se nahi, balki ek AI model ke apne gyaan se aayi hai - ho sakta hai thodi purani ya galat ho. Isse ek helpful guess ki tarah use karo, 100% pakki sach ki tarah mat bolo. Agar tumhe khud confidence nahi hai to seedha bol do 'pakka nahi pata yaar, khud check kar lena'. Jaankari: "
                 messages_for_ai.append({
                     "role": "system",
-                    "content": "Web se ye REAL aur LATEST jaankari mili hai. Isi info ka use karke user ke sawaal ka SAHI aur ASLI jawab do (Khan ke dost wale 2-line Hinglish andaz mein, thoda mazak bhi jod sakte ho) - lekin jawab mein actual jaankari zaroor honi chahiye, sirf mazak mein mat taal do: " + web_info
+                    "content": info_note + web_info
                 })
 
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
@@ -1424,11 +1522,43 @@ def get_ai_reply(user_id, user_text):
 
                 if not reply_text:
                     print("OPENROUTER BACKUP ALSO FAILED: " + str(openrouter_data))
-                    err_code = res_json.get("error", {}).get("code", "")
-                    is_429 = (res is not None and res.status_code == 429)
-                    if err_code == "rate_limit_exceeded" or is_429:
-                        return "Arre thoda ruk yaar, bahut load hai abhi. Thodi der baad phir try karo bhai 🙏"
-                    return "Arre yaar, dimaag hang ho gaya"
+                    # Chautha fallback: Mistral (free Experiment tier)
+                    mistral_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
+                    _, mistral_data = call_mistral(mistral_payload, timeout=20)
+                    if "choices" in mistral_data:
+                        reply_text = mistral_data["choices"][0]["message"]["content"]
+
+                    if not reply_text:
+                        print("MISTRAL BACKUP ALSO FAILED: " + str(mistral_data))
+                        # Paanchva fallback: Cerebras (free, 1M tokens/din)
+                        cerebras_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
+                        _, cerebras_data = call_cerebras(cerebras_payload, timeout=20)
+                        if "choices" in cerebras_data:
+                            reply_text = cerebras_data["choices"][0]["message"]["content"]
+
+                        if not reply_text:
+                            print("CEREBRAS BACKUP ALSO FAILED: " + str(cerebras_data))
+                            # Chhatva fallback: DeepSeek (free 5M tokens grant)
+                            deepseek_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
+                            _, deepseek_data = call_deepseek(deepseek_payload, timeout=20)
+                            if "choices" in deepseek_data:
+                                reply_text = deepseek_data["choices"][0]["message"]["content"]
+
+                            if not reply_text:
+                                print("DEEPSEEK BACKUP ALSO FAILED: " + str(deepseek_data))
+                                # Saatva fallback: NVIDIA NIM (free, no card)
+                                nvidia_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
+                                _, nvidia_data = call_nvidia(nvidia_payload, timeout=20)
+                                if "choices" in nvidia_data:
+                                    reply_text = nvidia_data["choices"][0]["message"]["content"]
+
+                                if not reply_text:
+                                    print("NVIDIA BACKUP ALSO FAILED: " + str(nvidia_data))
+                                    err_code = res_json.get("error", {}).get("code", "")
+                                    is_429 = (res is not None and res.status_code == 429)
+                                    if err_code == "rate_limit_exceeded" or is_429:
+                                        return "Arre thoda ruk yaar, bahut load hai abhi. Thodi der baad phir try karo bhai 🙏"
+                                    return "Arre yaar, dimaag hang ho gaya"
 
         now = time.time()
         history.append({"role": "user", "content": user_text, "time": now})
@@ -1453,6 +1583,16 @@ def send_message(chat_id, text, reply_to=None, parse_mode=None):
     except Exception as e:
         print("SEND ERROR: " + str(e))
         return None
+
+
+def send_typing_action(chat_id, action="typing"):
+    """Telegram ko batata hai ki bot abhi 'typing...' ya 'recording voice...' kar raha hai -
+    isse user ko upar chhota indicator dikhta hai, taaki lage bot soch raha hai, gayab nahi ho gaya.
+    action: 'typing', 'upload_photo', 'record_voice', 'upload_voice' etc."""
+    try:
+        requests.post(TELEGRAM_URL + "/sendChatAction", json={"chat_id": chat_id, "action": action}, timeout=10)
+    except Exception as e:
+        print("TYPING ACTION ERROR: " + str(e))
 
 
 REACTION_EMOJIS = ["👍", "😁", "🔥", "❤", "👏", "🤔", "😢", "🎉", "🤩", "👌", "🙏", "💯"]
@@ -1577,7 +1717,7 @@ def handle_image_request(chat_id, message_id, image_prompt, style_reference):
 
     reference_info = None
     try:
-        reference_info = fetch_web_info(image_prompt + " - appearance, hair color, eyes, outfit, distinctive features")
+        reference_info, _ = fetch_web_info(image_prompt + " - appearance, hair color, eyes, outfit, distinctive features")
     except Exception as e:
         print("IMAGE REFERENCE FETCH EXCEPTION: " + str(e))
 
