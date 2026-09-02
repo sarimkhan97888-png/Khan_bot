@@ -9,6 +9,7 @@ import base64
 import io
 import wave
 import threading
+import difflib
 
 app = Flask(__name__)
 
@@ -190,8 +191,8 @@ def get_name(user_dict):
 
 
 def remember_user(chat_id, from_user):
-    """Bot jis-jis user ka message dekhta hai, uska naam-ID yaad rakhta hai - taaki
-    baad mein /ban jaise commands mein naam se bhi target kiya ja sake."""
+    """Bot jis-jis user ka message dekhta hai, uska naam-ID-username yaad rakhta hai - taaki
+    baad mein /ban jaise commands mein naam se ya @username se bhi target kiya ja sake."""
     if not from_user or from_user.get('is_bot', False):
         return
     uid = from_user.get('id')
@@ -200,12 +201,17 @@ def remember_user(chat_id, from_user):
     first = (from_user.get('first_name') or '').strip()
     last = (from_user.get('last_name') or '').strip()
     full_name = (first + ' ' + last).strip()
+    username = (from_user.get('username') or '').strip()
 
     known_users.setdefault(chat_id, {})
     if first:
         known_users[chat_id][first.lower()] = {"id": uid, "name": first}
     if full_name and full_name.lower() != first.lower():
         known_users[chat_id][full_name.lower()] = {"id": uid, "name": full_name}
+    if username:
+        display_name = first or username
+        known_users[chat_id][username.lower()] = {"id": uid, "name": display_name}
+        known_users[chat_id]["@" + username.lower()] = {"id": uid, "name": display_name}
 
 
 def matches_real_member(chat_id, image_prompt):
@@ -1013,15 +1019,33 @@ def get_target_user(chat_id, message):
     if reply_msg:
         return reply_msg.get('from')
 
+    # Agar Telegram ne khud user ko "text_mention" ke roop mein embed kiya hai (jab kisi
+    # ko tap-select karke tag kiya jaata hai, chahe uska @username ho ya na ho) - ye
+    # sabse reliable tarika hai, isse pehle check karte hain.
+    for entity in message.get('entities', []):
+        if entity.get('type') == 'text_mention' and entity.get('user'):
+            return entity['user']
+
     text = message.get('text', '')
     parts = text.strip().split(maxsplit=1)
     if len(parts) < 2:
         return None
-    name_arg = parts[1].strip().lower()
-    if not name_arg:
+    arg = parts[1].strip()
+    if not arg:
         return None
 
     chat_users = known_users.get(chat_id, {})
+
+    if arg.startswith('@'):
+        # Username se target - sirf pehla token lo (username mein space nahi hota,
+        # baaki text jaise "/ban @sarim122 spam kar raha tha" ignore ho jaayega)
+        username_arg = arg.split()[0].lower()
+        match = chat_users.get(username_arg) or chat_users.get(username_arg.lstrip('@'))
+        if match:
+            return {"id": match["id"], "first_name": match["name"]}
+        return None
+
+    name_arg = arg.lower()
     match = chat_users.get(name_arg)
     if match:
         return {"id": match["id"], "first_name": match["name"]}
@@ -1450,12 +1474,15 @@ def fetch_web_info(query):
     return None, False
 
 
-def is_usable_reply(text, finish_reason=None):
+def is_usable_reply(text, finish_reason=None, user_text=None):
     """Kabhi kabhi koi weak/backup model adhura ya bekar jawab de deta hai (jaise sirf
     'The' jaisa toota-phoota fragment) - khaaskar jab finish_reason 'length' ho aur text
-    bahut chota ho (matlab model kuch aur likh raha tha aur beech mein kat gaya). Aisa
-    jawab user ko bhejne se pehle hi reject kar dete hain, taaki agla fallback try ho sake
-    - isse user ko kabhi bhi bekar/adhura reply nahi milega."""
+    bahut chota ho (matlab model kuch aur likh raha tha aur beech mein kat gaya). Ye check
+    aisa jawab user ko bhejne se pehle hi reject kar deta hai.
+
+    Ek aur cheez check karta hai: kabhi weak model user ki hi baat thoda ghuma-firaake
+    wapas bhej deta hai (jaise 'Ager nhi bheja to' -> 'Ager nahi bheja') - ye koi jawab
+    nahi hai, sirf echo hai. Isko bhi reject karte hain."""
     if not text:
         return False
     cleaned = text.strip()
@@ -1463,6 +1490,13 @@ def is_usable_reply(text, finish_reason=None):
         return False
     if finish_reason == "length" and len(cleaned) < 15:
         return False
+    if user_text:
+        a = re.sub(r'[^\w\s]', '', cleaned.lower()).strip()
+        b = re.sub(r'[^\w\s]', '', user_text.strip().lower()).strip()
+        if a and b and len(b) > 3:
+            similarity = difflib.SequenceMatcher(None, a, b).ratio()
+            if similarity > 0.75:
+                return False
     return True
 
 
@@ -1564,7 +1598,7 @@ def get_ai_reply(user_id, user_text):
                 print(name.upper() + " EXCEPTION: " + str(e))
                 text, finish_reason = None, None
 
-            if is_usable_reply(text, finish_reason):
+            if is_usable_reply(text, finish_reason, user_text_trimmed):
                 reply_text = text.strip()
                 break
             elif text:
