@@ -53,7 +53,7 @@ Zaroori niyam:
 - Jawab ki length sawaal ke hisaab se rakho - chhoti baat ka chhota jawab, thodi detail wali baat ka thoda bada jawab (2 line tak). Har baar sirf "haan" ya "na" jaisa ek-shabd wala jawab mat do jab tak sawaal khud sirf haan/na ka na ho - forced ek-shabd replies ajeeb aur robotic lagte hain, jaise real insaan baat kar hi nahi raha.
 - Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to uska SAHI aur ASLI jawab do."""
 
-DEFAULT_WELCOME = "Hey {name}, Welcome to {group}!"
+DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
 
 WELCOME_EXTRAS = [
     "Kaise ho bhai, mast raho!",
@@ -1396,7 +1396,7 @@ def get_ai_reply(user_id, user_text):
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
 
         # normal chat pehle Groq se, jaisa pehle tha
-        payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai}
+        payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
         res, res_json = call_groq(payload, timeout=20)
 
         reply_text = None
@@ -1408,7 +1408,7 @@ def get_ai_reply(user_id, user_text):
             print("GROQ CHAT FAILED (status " + str(groq_status) + "): " + str(res_json) + " -- trying Gemini backup")
             # Backup: Gemini se persona reply
             system_text, gemini_contents = to_gemini_contents(messages_for_ai)
-            gemini_payload = {"contents": gemini_contents}
+            gemini_payload = {"contents": gemini_contents, "generationConfig": {"temperature": 0.8, "maxOutputTokens": 120}}
             if system_text:
                 gemini_payload["systemInstruction"] = {"parts": [{"text": system_text}]}
             _, gemini_data = call_gemini(gemini_payload, timeout=20)
@@ -1417,7 +1417,7 @@ def get_ai_reply(user_id, user_text):
             if not reply_text:
                 print("GEMINI BACKUP ALSO FAILED: " + str(gemini_data))
                 # Teesra fallback: OpenRouter (free model)
-                openrouter_payload = {"messages": messages_for_ai}
+                openrouter_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
                 _, openrouter_data = call_openrouter(openrouter_payload, timeout=20)
                 if "choices" in openrouter_data:
                     reply_text = openrouter_data["choices"][0]["message"]["content"]
