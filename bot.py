@@ -43,6 +43,7 @@ group_settings = {}
 panel_state = {}
 waiting_for_welcome = {}
 known_users = {}  # chat_id -> {name_lower: {"id": user_id, "name": display_name}}
+moderation_records = {}  # chat_id -> {"banned": {user_id: name}, "muted": {user_id: name}} - /history ke liye
 
 HISTORY_HOURS = 24
 MAX_MESSAGES_PER_USER = 40
@@ -340,6 +341,10 @@ def handle_message(message):
             safe_run(show_panel_groups, chat_id)
             return
 
+        if text == '/history':
+            safe_run(show_history_groups, chat_id)
+            return
+
         state = panel_state.get(user_id)
         if state:
             stage = state.get('stage')
@@ -491,6 +496,9 @@ def handle_message(message):
     if cmd == '/unban':
         safe_run(handle_unban, chat_id, message)
         return
+    if cmd == '/unbanall':
+        safe_run(handle_unbanall, chat_id)
+        return
     if cmd == '/mute':
         safe_run(handle_mute, chat_id, message)
         return
@@ -566,17 +574,18 @@ def handle_message(message):
             photo_to_analyze = message['photo'][-1]['file_id']
 
         if photo_to_analyze:
-            safe_run(send_typing_action, chat_id, "typing")
-            photo_bytes = get_telegram_file_bytes(photo_to_analyze)
-            vision_reply = None
-            if photo_bytes:
-                vision_reply = analyze_photo_with_question(photo_bytes, user_text)
+            with TypingIndicator(chat_id, "typing"):
+                photo_bytes = get_telegram_file_bytes(photo_to_analyze)
+                vision_reply = None
+                if photo_bytes:
+                    vision_reply = analyze_photo_with_question(photo_bytes, user_text)
             if vision_reply:
                 safe_run(send_message, chat_id, vision_reply, message_id)
             else:
                 safe_run(send_message, chat_id, "Abhi photo dekh nahi pa raha yaar, dobara try karo.", message_id)
             return
 
+        raw_user_text = user_text
         if reply_to:
             quoted_text = reply_to.get('text') or reply_to.get('caption')
             if quoted_text:
@@ -585,9 +594,8 @@ def handle_message(message):
                 user_text = quoted_name + ' ne pehle ye likha tha: "' + quoted_text + '"\nUsi message ke reply mein ye bola gaya: "' + user_text + '"'
 
         wants_voice_reply = wants_voice(text)
-        safe_run(send_typing_action, chat_id, "record_voice" if wants_voice_reply else "typing")
-
-        reply = get_ai_reply(user_id, user_text)
+        with TypingIndicator(chat_id, "record_voice" if wants_voice_reply else "typing"):
+            reply = get_ai_reply(user_id, user_text, raw_user_text)
 
         if wants_voice_reply:
             audio = generate_tts(reply)
@@ -600,7 +608,7 @@ def handle_message(message):
 
 
 def HELP_TEXT():
-    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin (reply karke):\n/ban /kick /unban /mute /unmute /warn /pin\n/report - shikayat bhejo\n\nGroup:\n/rule - group ke rules dekho\n\nSettings:\n/setwelcome /linkson /linksoff\n\n/help - ye list"
+    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin (reply karke):\n/ban /kick /unban /mute /unmute /warn /pin\n/unbanall - saare banned members ek saath unban\n/report - shikayat bhejo\n\nGroup:\n/rule - group ke rules dekho\n\nSettings:\n/setwelcome /linkson /linksoff\n\nOwner DM:\n/panel - group control\n/history - banned/muted members dekho\n\n/help - ye list"
 
 
 def RULES_TEXT():
@@ -692,6 +700,7 @@ COMMAND_PERMISSION = {
     '/ban': 'can_restrict_members',
     '/kick': 'can_restrict_members',
     '/unban': 'can_restrict_members',
+    '/unbanall': 'can_restrict_members',
     '/mute': 'can_restrict_members',
     '/unmute': 'can_restrict_members',
     '/warn': 'can_restrict_members',
@@ -768,6 +777,55 @@ def show_panel_groups(chat_id):
         title = known_chats[gid]
         buttons.append([{"text": title, "callback_data": "panelgrp:" + str(gid)}])
     send_message_with_keyboard(chat_id, "Konsa group control karna hai?", {"inline_keyboard": buttons})
+
+
+def show_history_groups(chat_id):
+    """/history command - saare groups ki list dikhata hai jinme se select karke
+    banned/muted members dekh sakte hain."""
+    if not known_chats:
+        send_message(chat_id, "Abhi koi group activity nahi mili. Group mein pehle koi message aane do.")
+        return
+    buttons = []
+    for gid in known_chats:
+        title = known_chats[gid]
+        buttons.append([{"text": title, "callback_data": "histgrp:" + str(gid)}])
+    send_message_with_keyboard(chat_id, "Konsa group ka history dekhna hai?", {"inline_keyboard": buttons})
+
+
+def build_history_view(gid):
+    """Ek group ke banned/muted members ki list aur unke Unban/Unmute buttons banata hai."""
+    title = known_chats.get(gid, "Group")
+    records = moderation_records.get(gid, {"banned": {}, "muted": {}})
+    banned = records.get("banned", {})
+    muted = records.get("muted", {})
+
+    if not banned and not muted:
+        return title + "\n\nAbhi koi banned ya muted member nahi hai.", None
+
+    lines = [title + "\nBanned: " + str(len(banned)) + " | Muted: " + str(len(muted))]
+    buttons = []
+
+    if banned:
+        lines.append("\n🚫 Banned Members:")
+        for uid, name in banned.items():
+            lines.append("• " + name)
+            buttons.append([{"text": "✅ Unban " + name, "callback_data": "histact:unban:" + str(gid) + ":" + str(uid)}])
+
+    if muted:
+        lines.append("\n🔇 Muted Members:")
+        for uid, name in muted.items():
+            lines.append("• " + name)
+            buttons.append([{"text": "🔊 Unmute " + name, "callback_data": "histact:unmute:" + str(gid) + ":" + str(uid)}])
+
+    return "\n".join(lines), {"inline_keyboard": buttons}
+
+
+def show_group_history(chat_id, gid):
+    text, keyboard = build_history_view(gid)
+    if keyboard:
+        send_message_with_keyboard(chat_id, text, keyboard)
+    else:
+        send_message(chat_id, text)
 
 
 def show_group_menu(chat_id, gid):
@@ -860,6 +918,39 @@ def handle_callback(callback):
         safe_run(answer_callback, callback['id'], "Ok")
         return
 
+    if data_str.startswith("histgrp:"):
+        gid = int(data_str.split(":")[1])
+        safe_run(show_group_history, owner_dm_chat_id, gid)
+        safe_run(answer_callback, callback['id'], "Ok")
+        return
+
+    if data_str.startswith("histact:"):
+        parts = data_str.split(":")
+        subaction = parts[1]
+        gid = int(parts[2])
+        uid = int(parts[3])
+        if subaction == "unban":
+            requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": gid, "user_id": uid, "only_if_banned": True}, timeout=10)
+            unrecord_moderation(gid, "ban", uid)
+        elif subaction == "unmute":
+            requests.post(TELEGRAM_URL + "/restrictChatMember", json={
+                "chat_id": gid, "user_id": uid,
+                "permissions": {"can_send_messages": True, "can_send_media_messages": True,
+                                 "can_send_other_messages": True, "can_add_web_page_previews": True}
+            }, timeout=10)
+            unrecord_moderation(gid, "mute", uid)
+
+        text, keyboard = build_history_view(gid)
+        safe_run(answer_callback, callback['id'], "Done")
+        try:
+            requests.post(TELEGRAM_URL + "/editMessageText", json={
+                "chat_id": owner_dm_chat_id, "message_id": callback['message']['message_id'],
+                "text": text, "reply_markup": keyboard if keyboard else {"inline_keyboard": []}
+            }, timeout=10)
+        except Exception as e:
+            print("EDIT HISTORY ERROR: " + str(e))
+        return
+
     if data_str.startswith("bctype:"):
         parts = data_str.split(":")
         media_type = parts[1]
@@ -942,6 +1033,7 @@ def handle_callback(callback):
 def handle_modbtn(subaction, chat_id, target_id):
     if subaction == "unban":
         requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target_id, "only_if_banned": True}, timeout=10)
+        unrecord_moderation(chat_id, "ban", target_id)
         return "Unban kar diya gaya."
     elif subaction == "unwarn":
         chat_warns = warnings.setdefault(chat_id, {})
@@ -953,11 +1045,33 @@ def handle_modbtn(subaction, chat_id, target_id):
     return "Kuch nahi hua."
 
 
+def record_moderation(chat_id, kind, user_id, name):
+    """kind: 'ban' ya 'mute' - /history mein dikhane ke liye yaad rakhta hai."""
+    chat_records = moderation_records.setdefault(chat_id, {"banned": {}, "muted": {}})
+    if kind == "ban":
+        chat_records["banned"][user_id] = name
+        chat_records["muted"].pop(user_id, None)
+    elif kind == "mute":
+        chat_records["muted"][user_id] = name
+
+
+def unrecord_moderation(chat_id, kind, user_id):
+    """kind: 'ban' ya 'mute' - jab unban/unmute ho jaaye to list se hata do."""
+    chat_records = moderation_records.get(chat_id)
+    if not chat_records:
+        return
+    if kind == "ban":
+        chat_records["banned"].pop(user_id, None)
+    elif kind == "mute":
+        chat_records["muted"].pop(user_id, None)
+
+
 def do_moderation_action(action, chat_id, target_id, target_name=None):
     if not target_name:
         target_name = "ye banda"
     if action == "ban":
         requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+        record_moderation(chat_id, "ban", target_id, target_name)
         return (target_name + " ko ban kar diya gaya.", "ban")
     elif action == "kick":
         requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
@@ -967,6 +1081,7 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
         requests.post(TELEGRAM_URL + "/restrictChatMember", json={
             "chat_id": chat_id, "user_id": target_id, "permissions": {"can_send_messages": False}
         }, timeout=10)
+        record_moderation(chat_id, "mute", target_id, target_name)
         return (target_name + " ko mute kar diya gaya.", "mute")
     elif action == "unmute":
         requests.post(TELEGRAM_URL + "/restrictChatMember", json={
@@ -974,6 +1089,7 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
             "permissions": {"can_send_messages": True, "can_send_media_messages": True,
                              "can_send_other_messages": True, "can_add_web_page_previews": True}
         }, timeout=10)
+        unrecord_moderation(chat_id, "mute", target_id)
         return (target_name + " wapas bol sakta hai.", "unmute")
     elif action == "warn":
         chat_warns = warnings.setdefault(chat_id, {})
@@ -982,6 +1098,7 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
         if count >= 3:
             requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
             chat_warns[target_id] = 0
+            record_moderation(chat_id, "ban", target_id, target_name)
             return (target_name + " ki 3 warning ho gayi, ban kar diya.", "ban")
         return (target_name + " ko warning di gayi (" + str(count) + "/3)", "warn")
     else:
@@ -1091,7 +1208,33 @@ def handle_unban(chat_id, message):
         send_message(chat_id, "Kisi ke message pe reply karke /unban likho, ya /unban naam likho!")
         return
     requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target['id'], "only_if_banned": True}, timeout=10)
+    unrecord_moderation(chat_id, "ban", target['id'])
     send_message(chat_id, get_name(target) + " ka ban hata diya.")
+
+
+def handle_unbanall(chat_id):
+    """Bot ke history mein jitne bhi log is group mein ban hain, sabko ek saath unban
+    kar deta hai. GC mein /unbanall likhne se hi chalta hai."""
+    records = moderation_records.get(chat_id, {"banned": {}})
+    banned = dict(records.get("banned", {}))  # copy le lo, kyunki loop ke andar hi modify hoga
+    if not banned:
+        send_message(chat_id, "Is group mein abhi koi banned member nahi hai.")
+        return
+
+    send_message(chat_id, str(len(banned)) + " members ko unban kar raha hu, thoda ruko...")
+    unbanned_names = []
+    for uid, name in banned.items():
+        try:
+            requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": uid, "only_if_banned": True}, timeout=10)
+            unrecord_moderation(chat_id, "ban", uid)
+            unbanned_names.append(name)
+        except Exception as e:
+            print("UNBANALL ERROR for " + str(uid) + ": " + str(e))
+
+    if unbanned_names:
+        send_message(chat_id, "✅ " + str(len(unbanned_names)) + " members unban ho gaye:\n" + ", ".join(unbanned_names))
+    else:
+        send_message(chat_id, "Kisi ko bhi unban nahi kar paaya, kuch gadbad ho gayi.")
 
 
 def handle_mute(chat_id, message):
@@ -1534,7 +1677,13 @@ def _try_openai_compatible_chat(name, call_fn, messages_for_ai):
     return None, None
 
 
-def get_ai_reply(user_id, user_text):
+def get_ai_reply(user_id, user_text, raw_text=None):
+    """raw_text: agar diya gaya hai, to history mein ye (user ne jo asli mein type kiya)
+    save hota hai - user_text (jisme quote-context wrapped ho sakta hai) sirf isi turn ke
+    AI call ke liye use hota hai. Isse future messages ka context saaf rehta hai, kyunki
+    baar baar 'X ne pehle ye likha tha...' wala pura wrapped text history mein nahi bharta."""
+    if raw_text is None:
+        raw_text = user_text
     try:
         history = get_user_history(user_id)
 
@@ -1609,7 +1758,7 @@ def get_ai_reply(user_id, user_text):
             return "Arre thoda ruk yaar, sab AI thoda busy hai abhi. Thodi der baad phir try karo bhai 🙏"
 
         now = time.time()
-        history.append({"role": "user", "content": user_text, "time": now})
+        history.append({"role": "user", "content": raw_text, "time": now})
         history.append({"role": "assistant", "content": reply_text, "time": now})
         chat_memory[user_id] = history[-MAX_MESSAGES_PER_USER:]
 
@@ -1641,6 +1790,36 @@ def send_typing_action(chat_id, action="typing"):
         requests.post(TELEGRAM_URL + "/sendChatAction", json={"chat_id": chat_id, "action": action}, timeout=10)
     except Exception as e:
         print("TYPING ACTION ERROR: " + str(e))
+
+
+class TypingIndicator:
+    """Telegram ka 'typing...' status sirf ~5 second tak dikhta hai. Jab bot ke andar
+    multiple AI fallback providers try hote hain (Groq fail -> Gemini fail -> OpenRouter...),
+    poora process 10-20+ second bhi le sakta hai - isliye indicator beech mein gayab ho
+    jaata tha aur lagta tha bot kuch nahi kar raha. Ye class background mein har 4 second
+    mein typing action ko refresh karti rehti hai jab tak reply taiyar na ho jaaye.
+
+    Use: with TypingIndicator(chat_id, "typing"): reply = get_ai_reply(...)
+    """
+    def __init__(self, chat_id, action="typing"):
+        self.chat_id = chat_id
+        self.action = action
+        self.stop_event = threading.Event()
+        self.thread = None
+
+    def _loop(self):
+        while not self.stop_event.is_set():
+            send_typing_action(self.chat_id, self.action)
+            self.stop_event.wait(4)
+
+    def __enter__(self):
+        send_typing_action(self.chat_id, self.action)
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_event.set()
 
 
 REACTION_EMOJIS = ["👍", "😁", "🔥", "❤", "👏", "🤔", "😢", "🎉", "🤩", "👌", "🙏", "💯"]
