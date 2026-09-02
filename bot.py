@@ -99,6 +99,7 @@ def build_leave_message(user_id, name, group_name):
     mention = mention_html(user_id, name)
     return mention + " ne " + escape_html(group_name) + " se leave kar diya 👋"
 LINK_PATTERN = re.compile(r'(https?://|www\.|t\.me/|telegram\.me/)', re.IGNORECASE)
+MENTION_PATTERN = re.compile(r'@(\w{4,})')  # @username tag karna - 4+ chars, real Telegram usernames kam se kam 5 ke hote hain
 
 DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
 DM_DISCLAIMER = "DM mein hone wale kisi bhi spam/scam ki zimmedari group ya admin ki nahi hogi, khud dhyan rakhna bhai."
@@ -431,23 +432,28 @@ def handle_message(message):
         safe_run(send_message, chat_id, "Naya welcome message set ho gaya!")
         return
 
-    if settings.get('link_filter', True) and LINK_PATTERN.search(text):
-        if not safe_check_admin(chat_id, user_id):
+    # ---- Link / @mention / gaali - sabpe auto-warn (commands jaise "/ban @user" exempt hain) ----
+    if not text.startswith('/'):
+        is_privileged = is_owner(user_id) or safe_check_admin(chat_id, user_id)
+
+        has_link = settings.get('link_filter', True) and bool(LINK_PATTERN.search(text))
+        mention_match = MENTION_PATTERN.search(text)
+        has_mention = bool(mention_match) and mention_match.group(1).lower() != BOT_USERNAME.lower()
+
+        if (has_link or has_mention) and not is_privileged:
             try:
                 requests.post(TELEGRAM_URL + "/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
-                from_user = message.get('from', {})
-                name = from_user.get('first_name', 'Bhai')
-                mention = mention_html(user_id, name)
-                safe_run(send_message, chat_id, mention + ", yahan link allowed nahi hai bhai.", None, "HTML")
             except Exception as e:
-                print("LINK DELETE ERROR: " + str(e))
+                print("AUTO-DELETE ERROR: " + str(e))
+            name = get_name(message.get('from', {}))
+            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
             return
 
-    # ---- Gaali filter (owner exempt) ----
-    if not is_owner(user_id) and contains_bad_word(text):
-        name = get_name(message.get('from', {}))
-        safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
-        return
+        # ---- Gaali filter (owner exempt) ----
+        if not is_owner(user_id) and contains_bad_word(text):
+            name = get_name(message.get('from', {}))
+            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
+            return
 
     # ---- DM spam disclaimer ----
     if DM_PATTERN.search(text):
