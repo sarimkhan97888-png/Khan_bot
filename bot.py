@@ -1450,6 +1450,56 @@ def fetch_web_info(query):
     return None, False
 
 
+def is_usable_reply(text, finish_reason=None):
+    """Kabhi kabhi koi weak/backup model adhura ya bekar jawab de deta hai (jaise sirf
+    'The' jaisa toota-phoota fragment) - khaaskar jab finish_reason 'length' ho aur text
+    bahut chota ho (matlab model kuch aur likh raha tha aur beech mein kat gaya). Aisa
+    jawab user ko bhejne se pehle hi reject kar dete hain, taaki agla fallback try ho sake
+    - isse user ko kabhi bhi bekar/adhura reply nahi milega."""
+    if not text:
+        return False
+    cleaned = text.strip()
+    if len(cleaned) < 2:
+        return False
+    if finish_reason == "length" and len(cleaned) < 15:
+        return False
+    return True
+
+
+def _try_groq_chat(messages_for_ai):
+    payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai, "temperature": 0.8, "max_tokens": 200}
+    res, data = call_groq(payload, timeout=20)
+    if "choices" in data:
+        choice = data["choices"][0]
+        return choice["message"]["content"], choice.get("finish_reason")
+    status = res.status_code if res is not None else "skipped"
+    print("GROQ CHAT FAILED (status " + str(status) + "): " + str(data))
+    return None, None
+
+
+def _try_gemini_chat(messages_for_ai):
+    system_text, gemini_contents = to_gemini_contents(messages_for_ai)
+    payload = {"contents": gemini_contents, "generationConfig": {"temperature": 0.8, "maxOutputTokens": 200}}
+    if system_text:
+        payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+    _, data = call_gemini(payload, timeout=20)
+    text = extract_gemini_text(data)
+    if text:
+        return text, None
+    print("GEMINI CHAT FAILED: " + str(data))
+    return None, None
+
+
+def _try_openai_compatible_chat(name, call_fn, messages_for_ai):
+    payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 200}
+    _, data = call_fn(payload, timeout=20)
+    if "choices" in data:
+        choice = data["choices"][0]
+        return choice["message"]["content"], choice.get("finish_reason")
+    print(name.upper() + " CHAT FAILED: " + str(data))
+    return None, None
+
+
 def get_ai_reply(user_id, user_text):
     try:
         history = get_user_history(user_id)
@@ -1493,72 +1543,36 @@ def get_ai_reply(user_id, user_text):
 
         messages_for_ai.append({"role": "user", "content": user_text_trimmed})
 
-        # normal chat pehle Groq se, jaisa pehle tha
-        payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
-        res, res_json = call_groq(payload, timeout=20)
+        # 7 providers ki chain ek-ek karke try karo - jo bhi pehla usable (na-adhura, na-khali)
+        # jawab de de, wahi use karte hain. Isse code bhi saaf hai aur galti se ek provider ka
+        # step chhoot jaane ka risk bhi nahi (jaisa pehle deeply-nested if-else mein ho sakta tha).
+        providers = [
+            ("groq", lambda: _try_groq_chat(messages_for_ai)),
+            ("gemini", lambda: _try_gemini_chat(messages_for_ai)),
+            ("openrouter", lambda: _try_openai_compatible_chat("openrouter", call_openrouter, messages_for_ai)),
+            ("mistral", lambda: _try_openai_compatible_chat("mistral", call_mistral, messages_for_ai)),
+            ("cerebras", lambda: _try_openai_compatible_chat("cerebras", call_cerebras, messages_for_ai)),
+            ("deepseek", lambda: _try_openai_compatible_chat("deepseek", call_deepseek, messages_for_ai)),
+            ("nvidia", lambda: _try_openai_compatible_chat("nvidia", call_nvidia, messages_for_ai)),
+        ]
 
         reply_text = None
+        for name, attempt in providers:
+            try:
+                text, finish_reason = attempt()
+            except Exception as e:
+                print(name.upper() + " EXCEPTION: " + str(e))
+                text, finish_reason = None, None
 
-        if "choices" in res_json:
-            reply_text = res_json["choices"][0]["message"]["content"]
-        else:
-            groq_status = res.status_code if res is not None else "skipped"
-            print("GROQ CHAT FAILED (status " + str(groq_status) + "): " + str(res_json) + " -- trying Gemini backup")
-            # Backup: Gemini se persona reply
-            system_text, gemini_contents = to_gemini_contents(messages_for_ai)
-            gemini_payload = {"contents": gemini_contents, "generationConfig": {"temperature": 0.8, "maxOutputTokens": 120}}
-            if system_text:
-                gemini_payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-            _, gemini_data = call_gemini(gemini_payload, timeout=20)
-            reply_text = extract_gemini_text(gemini_data)
+            if is_usable_reply(text, finish_reason):
+                reply_text = text.strip()
+                break
+            elif text:
+                print(name.upper() + " GAVE UNUSABLE/ADHURA REPLY, trying next provider: " + repr(text))
 
-            if not reply_text:
-                print("GEMINI BACKUP ALSO FAILED: " + str(gemini_data))
-                # Teesra fallback: OpenRouter (free model)
-                openrouter_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
-                _, openrouter_data = call_openrouter(openrouter_payload, timeout=20)
-                if "choices" in openrouter_data:
-                    reply_text = openrouter_data["choices"][0]["message"]["content"]
-
-                if not reply_text:
-                    print("OPENROUTER BACKUP ALSO FAILED: " + str(openrouter_data))
-                    # Chautha fallback: Mistral (free Experiment tier)
-                    mistral_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
-                    _, mistral_data = call_mistral(mistral_payload, timeout=20)
-                    if "choices" in mistral_data:
-                        reply_text = mistral_data["choices"][0]["message"]["content"]
-
-                    if not reply_text:
-                        print("MISTRAL BACKUP ALSO FAILED: " + str(mistral_data))
-                        # Paanchva fallback: Cerebras (free, 1M tokens/din)
-                        cerebras_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
-                        _, cerebras_data = call_cerebras(cerebras_payload, timeout=20)
-                        if "choices" in cerebras_data:
-                            reply_text = cerebras_data["choices"][0]["message"]["content"]
-
-                        if not reply_text:
-                            print("CEREBRAS BACKUP ALSO FAILED: " + str(cerebras_data))
-                            # Chhatva fallback: DeepSeek (free 5M tokens grant)
-                            deepseek_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
-                            _, deepseek_data = call_deepseek(deepseek_payload, timeout=20)
-                            if "choices" in deepseek_data:
-                                reply_text = deepseek_data["choices"][0]["message"]["content"]
-
-                            if not reply_text:
-                                print("DEEPSEEK BACKUP ALSO FAILED: " + str(deepseek_data))
-                                # Saatva fallback: NVIDIA NIM (free, no card)
-                                nvidia_payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 120}
-                                _, nvidia_data = call_nvidia(nvidia_payload, timeout=20)
-                                if "choices" in nvidia_data:
-                                    reply_text = nvidia_data["choices"][0]["message"]["content"]
-
-                                if not reply_text:
-                                    print("NVIDIA BACKUP ALSO FAILED: " + str(nvidia_data))
-                                    err_code = res_json.get("error", {}).get("code", "")
-                                    is_429 = (res is not None and res.status_code == 429)
-                                    if err_code == "rate_limit_exceeded" or is_429:
-                                        return "Arre thoda ruk yaar, bahut load hai abhi. Thodi der baad phir try karo bhai 🙏"
-                                    return "Arre yaar, dimaag hang ho gaya"
+        if not reply_text:
+            print("ALL " + str(len(providers)) + " AI PROVIDERS FAILED for this message")
+            return "Arre thoda ruk yaar, sab AI thoda busy hai abhi. Thodi der baad phir try karo bhai 🙏"
 
         now = time.time()
         history.append({"role": "user", "content": user_text, "time": now})
