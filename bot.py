@@ -454,8 +454,12 @@ def handle_message(message):
             safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
             return
 
-        # ---- Gaali filter (owner exempt) ----
+        # ---- Gaali filter (owner exempt) - message delete + warning dono ----
         if not is_owner(user_id) and contains_bad_word(text):
+            try:
+                requests.post(TELEGRAM_URL + "/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            except Exception as e:
+                print("GAALI DELETE ERROR: " + str(e))
             name = get_name(message.get('from', {}))
             safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
             return
@@ -518,6 +522,9 @@ def handle_message(message):
         return
     if cmd == '/warn':
         safe_run(handle_warn, chat_id, message)
+        return
+    if cmd == '/unwarn':
+        safe_run(handle_unwarn, chat_id, message)
         return
     if cmd == '/pin':
         safe_run(handle_pin, chat_id, message)
@@ -620,7 +627,7 @@ def handle_message(message):
 
 
 def HELP_TEXT():
-    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin (reply karke):\n/ban /kick /unban /mute /unmute /warn /pin\n/unbanall - saare banned members ek saath unban\n/report - shikayat bhejo\n\nGroup:\n/rule - group ke rules dekho\n\nSettings:\n/setwelcome /linkson /linksoff\n\nOwner DM:\n/panel - group control\n/history - banned/muted members dekho\n\n/help - ye list"
+    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin/Owner only (reply karke):\n/ban /kick /unban /mute /unmute /warn /unwarn /pin\n/unbanall - saare banned members ek saath unban\n\nGroup (sabke liye):\n/rule - group ke rules dekho\n/report - shikayat bhejo\n\nAdmin/Owner only settings:\n/setwelcome /linkson /linksoff\n\nOwner DM:\n/panel - group control\n/history - banned/muted members dekho\n\n/help - ye list"
 
 
 def RULES_TEXT():
@@ -716,7 +723,11 @@ COMMAND_PERMISSION = {
     '/mute': 'can_restrict_members',
     '/unmute': 'can_restrict_members',
     '/warn': 'can_restrict_members',
+    '/unwarn': 'can_restrict_members',
     '/pin': 'can_pin_messages',
+    '/setwelcome': 'can_change_info',
+    '/linkson': 'can_change_info',
+    '/linksoff': 'can_change_info',
 }
 
 
@@ -1279,6 +1290,21 @@ def handle_warn(chat_id, message):
         send_message(chat_id, protection)
         return
     moderation_action_and_notify("warn", chat_id, target['id'], get_name(target), chat_id)
+
+
+def handle_unwarn(chat_id, message):
+    """Kisi member ki ek warning kam kar deta hai - sirf Admin/Owner use kar sakte hain."""
+    target = get_target_user(chat_id, message)
+    if not target:
+        send_message(chat_id, "Kisi ke message pe reply karke /unwarn likho, ya /unwarn naam likho!")
+        return
+    chat_warns = warnings.setdefault(chat_id, {})
+    current = chat_warns.get(target['id'], 0)
+    if current <= 0:
+        send_message(chat_id, get_name(target) + " ki koi warning hi nahi hai.")
+        return
+    chat_warns[target['id']] = current - 1
+    send_message(chat_id, get_name(target) + " ki 1 warning kam kar di. Ab: " + str(chat_warns[target['id']]) + "/3")
 
 
 def handle_pin(chat_id, message):
