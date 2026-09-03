@@ -1655,6 +1655,29 @@ def fetch_web_info(query):
     return None, False
 
 
+REASONING_LEAK_MARKERS = [
+    "here's a thinking process", "here is a thinking process", "let me think about this",
+    "let me analyze", "analyze the user's", "analyze the user input", "system instructions",
+    "the system prompt", "determine the persona", "step-by-step reasoning",
+    "chain of thought", "as an ai language model", "i need to consider",
+    "the user is asking", "the user said:", "1. **analyze",
+]
+
+
+def looks_like_leaked_reasoning(text):
+    """Kabhi kabhi koi reasoning-wala AI model (jaise Groq ka gpt-oss) galti se apna
+    poora internal 'sochne ka process' bhi answer ke andar bhej deta hai - jisme system
+    prompt ke details, persona-analysis, meta-commentary sab dikhne lagta hai (bahut bada
+    security aur UX dono ka issue hai). Ye check aise jawab ko pakadta hai."""
+    if not text:
+        return False
+    lowered = text.lower()
+    for marker in REASONING_LEAK_MARKERS:
+        if marker in lowered:
+            return True
+    return False
+
+
 def is_usable_reply(text, finish_reason=None, user_text=None):
     """Kabhi kabhi koi weak/backup model adhura ya bekar jawab de deta hai (jaise sirf
     'The' jaisa toota-phoota fragment) - khaaskar jab finish_reason 'length' ho aur text
@@ -1663,13 +1686,19 @@ def is_usable_reply(text, finish_reason=None, user_text=None):
 
     Ek aur cheez check karta hai: kabhi weak model user ki hi baat thoda ghuma-firaake
     wapas bhej deta hai (jaise 'Ager nhi bheja to' -> 'Ager nahi bheja') - ye koi jawab
-    nahi hai, sirf echo hai. Isko bhi reject karte hain."""
+    nahi hai, sirf echo hai. Isko bhi reject karte hain.
+
+    Aur ek aakhri, sabse zaroori check: agar jawab mein leaked internal reasoning/thinking
+    process ke signs hain, to use bilkul reject kar dete hain - chahe wo kitna bhi lamba
+    ya "complete" kyun na lage."""
     if not text:
         return False
     cleaned = text.strip()
     if len(cleaned) < 2:
         return False
     if finish_reason == "length" and len(cleaned) < 15:
+        return False
+    if looks_like_leaked_reasoning(cleaned):
         return False
     if user_text:
         a = re.sub(r'[^\w\s]', '', cleaned.lower()).strip()
@@ -1682,7 +1711,16 @@ def is_usable_reply(text, finish_reason=None, user_text=None):
 
 
 def _try_groq_chat(messages_for_ai):
-    payload = {"model": "openai/gpt-oss-120b", "messages": messages_for_ai, "temperature": 0.8, "max_tokens": 200}
+    # reasoning_format="hidden" ZAROORI hai - warna gpt-oss-120b (reasoning model) apna
+    # poora internal 'thinking process' bhi answer ke andar bhej deta hai (jo user ko
+    # dikhta hai) - Groq ke docs confirm karte hain ki default 'raw' hai, isse content
+    # aur reasoning aapas mein mix ho jaate hain. 'hidden' set karne se sirf final, saaf
+    # jawab milta hai.
+    payload = {
+        "model": "openai/gpt-oss-120b", "messages": messages_for_ai,
+        "temperature": 0.8, "max_tokens": 200,
+        "reasoning_format": "hidden", "reasoning_effort": "low"
+    }
     res, data = call_groq(payload, timeout=20)
     if "choices" in data:
         choice = data["choices"][0]
@@ -1705,8 +1743,10 @@ def _try_gemini_chat(messages_for_ai):
     return None, None
 
 
-def _try_openai_compatible_chat(name, call_fn, messages_for_ai):
+def _try_openai_compatible_chat(name, call_fn, messages_for_ai, extra=None):
     payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 200}
+    if extra:
+        payload.update(extra)
     _, data = call_fn(payload, timeout=20)
     if "choices" in data:
         choice = data["choices"][0]
@@ -1788,7 +1828,7 @@ def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
             ("gemini", lambda: _try_gemini_chat(messages_for_ai)),
             ("openrouter", lambda: _try_openai_compatible_chat("openrouter", call_openrouter, messages_for_ai)),
             ("mistral", lambda: _try_openai_compatible_chat("mistral", call_mistral, messages_for_ai)),
-            ("cerebras", lambda: _try_openai_compatible_chat("cerebras", call_cerebras, messages_for_ai)),
+            ("cerebras", lambda: _try_openai_compatible_chat("cerebras", call_cerebras, messages_for_ai, {"reasoning_format": "hidden"})),
             ("deepseek", lambda: _try_openai_compatible_chat("deepseek", call_deepseek, messages_for_ai)),
             ("nvidia", lambda: _try_openai_compatible_chat("nvidia", call_nvidia, messages_for_ai)),
         ]
