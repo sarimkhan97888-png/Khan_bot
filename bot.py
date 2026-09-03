@@ -61,7 +61,10 @@ Zaroori niyam:
 - Koi insult kare to thoda attitude dikhao - bina gaali ke.
 - Hamesha Hinglish, natural, jaise dost chat karte hain - kabhi formal ya robotic mat lagna.
 - Jawab ki length sawaal ke hisaab se rakho - chhoti baat ka chhota jawab, thodi detail wali baat ka thoda bada jawab (2 line tak). Har baar sirf "haan" ya "na" jaisa ek-shabd wala jawab mat do jab tak sawaal khud sirf haan/na ka na ho - forced ek-shabd replies ajeeb aur robotic lagte hain, jaise real insaan baat kar hi nahi raha.
-- Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to uska SAHI aur ASLI jawab do."""
+- Agar koi seedha sawaal poochta hai (fact, jagah, cheez, "kya hai", "kaun tha", "kaise hua" wagera), to uska SAHI aur ASLI jawab do.
+- Baat ke chhote-chhote ishaare (tone, mood, sarcasm, halki si khushi ya jhunjhlahat) bhi pakdo - jaise ek real dost dhyan se sunta hai, sirf shabdon ka literal matlab nahi, poori baat ka feel samjho.
+- Kabhi bhi kisi purane message ko "explain" ya "iska matlab tha" jaisa describe mat karo - agar context diya gaya hai to bas use samajhkar seedha jawab do, jaise tumhe pehle se pata tha kis baat pe baat ho rahi hai.
+- Consistency rakho - tumhara tone, mood, aur andaz har reply mein same rehna chahiye, chahe jawab kahin se bhi (kisi bhi AI backend se) aaya ho, kabhi Khan se alag feel nahi hona chahiye."""
 
 DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
 
@@ -592,16 +595,17 @@ def handle_message(message):
             return
 
         raw_user_text = user_text
+        quoted_context = None
         if reply_to:
             quoted_text = reply_to.get('text') or reply_to.get('caption')
             if quoted_text:
                 quoted_from = reply_to.get('from', {})
                 quoted_name = get_name(quoted_from)
-                user_text = quoted_name + ' ne pehle ye likha tha: "' + quoted_text + '"\nUsi message ke reply mein ye bola gaya: "' + user_text + '"'
+                quoted_context = (quoted_name, quoted_text)
 
         wants_voice_reply = wants_voice(text)
         with TypingIndicator(chat_id, "record_voice" if wants_voice_reply else "typing"):
-            reply = get_ai_reply(user_id, user_text, raw_user_text)
+            reply = get_ai_reply(user_id, user_text, raw_user_text, quoted_context)
 
         if wants_voice_reply:
             audio = generate_tts(reply)
@@ -1683,11 +1687,16 @@ def _try_openai_compatible_chat(name, call_fn, messages_for_ai):
     return None, None
 
 
-def get_ai_reply(user_id, user_text, raw_text=None):
+def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
     """raw_text: agar diya gaya hai, to history mein ye (user ne jo asli mein type kiya)
-    save hota hai - user_text (jisme quote-context wrapped ho sakta hai) sirf isi turn ke
-    AI call ke liye use hota hai. Isse future messages ka context saaf rehta hai, kyunki
-    baar baar 'X ne pehle ye likha tha...' wala pura wrapped text history mein nahi bharta."""
+    save hota hai - sirf isi turn ke AI call ke liye extra context use hota hai. Isse
+    future messages ka context saaf rehta hai.
+
+    quoted_context: (quoted_name, quoted_text) tuple - agar user ne kisi purane message
+    pe reply kiya hai. Ye ek system-instruction ke roop mein diya jaata hai, taaki AI use
+    sirf BACKGROUND jaankari ki tarah le, aur khud us quote ko explain/describe karne na
+    lage (jaisa pehle hota tha - 'uska matlab tha...' jaisा meta-commentary), balki seedha
+    natural dost jaisa jawab de."""
     if raw_text is None:
         raw_text = user_text
     try:
@@ -1716,6 +1725,17 @@ def get_ai_reply(user_id, user_text, raw_text=None):
 
         messages_for_ai = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages_for_ai.extend(packed)
+
+        if quoted_context:
+            q_name, q_text = quoted_context
+            messages_for_ai.append({
+                "role": "system",
+                "content": "[Sirf background context ke liye, isko explain ya describe MAT karna: " + q_name +
+                            " ne pehle ye kaha tha: \"" + trim(q_text, 1000) + "\". Neeche wala message usi ka reply hai. "
+                            "Bas is context ko dhyan mein rakhkar, jaise ek dost ko pura pata hota hai kis baat pe baat ho rahi hai "
+                            "waise hi seedha, natural jawab do - kabhi bhi 'iska matlab tha' ya 'reply ka matlab' jaisa kuch mat bolo, "
+                            "bas normal conversation jaisa jawab do.]"
+            })
 
         # sirf jab query ko current/web info chahiye, tabhi alag se search karo
         if needs_web_info(user_text_trimmed):
