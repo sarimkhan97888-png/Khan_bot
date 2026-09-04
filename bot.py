@@ -1660,29 +1660,94 @@ REASONING_LEAK_MARKERS = [
     "let me analyze", "analyze the user's", "analyze the user input", "system instructions",
     "the system prompt", "determine the persona", "step-by-step reasoning",
     "chain of thought", "as an ai language model", "i need to consider",
-    "the user is asking", "the user said:", "1. **analyze",
+    "the user is asking", "the user said:", "1. **analyze", "let's see", "let's see.",
+    "looking at the history", "so the user is", "according to the rules",
+    "the user is kind of", "okay, let's", "okay let's", "i shouldn't add",
 ]
 
 
 def looks_like_leaked_reasoning(text):
-    """Kabhi kabhi koi reasoning-wala AI model (jaise Groq ka gpt-oss) galti se apna
-    poora internal 'sochne ka process' bhi answer ke andar bhej deta hai - jisme system
-    prompt ke details, persona-analysis, meta-commentary sab dikhne lagta hai (bahut bada
-    security aur UX dono ka issue hai). Ye check aise jawab ko pakadta hai."""
+    """Kabhi kabhi koi reasoning-wala AI model (jaise Groq ka gpt-oss, ya OpenRouter ka
+    auto-picked koi reasoning model) galti se apna poora internal 'sochne ka process'
+    bhi answer ke andar bhej deta hai - jisme system prompt ke details, persona-analysis,
+    meta-commentary sab dikhne lagta hai. Har model alag wording use karta hai, isliye
+    sirf specific phrases dhoondhna kaafi nahi - isliye LENGTH aur STRUCTURE (bahut lamba
+    jawab, numbered list, kai paragraphs) pe bhi check karte hain, jo har reasoning-leak
+    mein common hota hai chahe wording kuch bhi ho. Khan ka har reply max 2-line hota hai,
+    isliye koi bhi bahut lamba jawab khud hi suspicious hai."""
     if not text:
         return False
     lowered = text.lower()
     for marker in REASONING_LEAK_MARKERS:
         if marker in lowered:
             return True
+    # Khan ka persona hamesha max 2-line ka hota hai - ek genuine reply itna lamba
+    # (350+ characters) kabhi nahi hota. Isse wording-independent protection milta hai.
+    if len(text) > 350:
+        return True
+    # Numbered analysis steps (1. 2. 3. ...) - reasoning traces mein aam hai, casual
+    # 2-line reply mein kabhi nahi hota.
+    if len(re.findall(r'(?:^|\n)\s*\d+\.\s', text)) >= 2:
+        return True
+    # Kai paragraphs (reasoning mein hote hain, casual chat reply mein nahi)
+    if text.count('\n\n') >= 2:
+        return True
+    return False
+
+
+INCOMPLETE_TRAILING_WORDS = {
+    "aur", "ki", "jo", "kyunki", "kyuki", "lekin", "but", "and", "jaise", "warna",
+    "jabki", "taaki", "magar", "or", "jisse", "isliye", "kyu", "kyun", "ke", "ka",
+}
+
+# Chhote (1-3 letter) Hindi/Hinglish words jo genuinely ek sentence ko khatam kar sakte
+# hain - inke alawa koi bhi chhota, ajeeb sa aakhri "word" (jaise 'pa' - jo asal mein
+# 'paas' ka aadha-kata hua tha) suspicious maana jaayega.
+SAFE_SHORT_ENDING_WORDS = {
+    "hai", "ho", "ka", "ki", "ko", "se", "pe", "par", "bhi", "na", "to", "toh", "wo",
+    "vo", "ye", "yeh", "kya", "kyu", "kyun", "aa", "ja", "le", "de", "kar", "kr",
+    "gya", "gyi", "gaya", "gayi", "tha", "thi", "the", "hu", "hun", "hoon", "tu",
+    "tum", "main", "mai", "bhai", "yaar", "ok", "haan", "han", "nahi", "nhi", "hoga",
+    "hogi", "kal", "ab", "hi", "wah", "are", "abe", "oye", "kab", "sab", "tab", "jab",
+    "aaj", "abhi", "phir", "chal", "chalo", "ruk", "dekh", "sun", "bata", "acha",
+    "accha", "theek", "thik", "sahi", "galat", "kaisa", "kaisi", "kaise",
+}
+
+
+def ends_incomplete(text):
+    """Agar jawab comma/dash/colon pe khatam ho raha hai (jaise 'Kya hua,'), ek aise
+    connector word pe khatam ho raha hai jo kabhi bhi ek complete Hindi/English sentence
+    ka aakhri shabd nahi hota (jaise 'aur', 'ki', 'jo', 'lekin'), YA ek chhota, ajeeb sa
+    ADHOORA word (jaise 'pa' jab 'paas' hona chahiye tha) - to matlab jawab beech mein hi
+    kat gaya hai, chahe uska finish_reason kuch bhi bataye."""
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    if cleaned[-1] in ',-:;–—':
+        return True
+    stripped_end = cleaned.rstrip('.!?"\')।')
+    words = re.findall(r"[\w']+", stripped_end.lower())
+    if not words:
+        return False
+    last_word = words[-1]
+    if last_word in INCOMPLETE_TRAILING_WORDS:
+        return True
+    # Agar aakhri "word" 1-2 letters ka hai, sirf letters se bana hai (koi number/emoji
+    # nahi), aur ek jaana-pehchana chhota Hindi/Hinglish word nahi hai - to shayad ye
+    # kisi bade word ka adhoora reh gaya tuta hua tukda hai. (3-letter tak nahi jaate,
+    # warna 'bye', 'wow' jaise valid words galti se reject ho jaate.)
+    if 1 <= len(last_word) <= 2 and last_word.isalpha() and last_word not in SAFE_SHORT_ENDING_WORDS:
+        return True
     return False
 
 
 def is_usable_reply(text, finish_reason=None, user_text=None):
     """Kabhi kabhi koi weak/backup model adhura ya bekar jawab de deta hai (jaise sirf
-    'The' jaisa toota-phoota fragment) - khaaskar jab finish_reason 'length' ho aur text
-    bahut chota ho (matlab model kuch aur likh raha tha aur beech mein kat gaya). Ye check
-    aisa jawab user ko bhejne se pehle hi reject kar deta hai.
+    'The' jaisa toota-phoota fragment, 'Kya hua,' jaisa comma pe kata hua, ya 'apne pa'
+    jaisa beech-word mein kata hua) - khaaskar jab model token-limit ki wajah se beech
+    mein hi ruk jaaye (finish_reason 'length'), ya jawab khud hi ek adhoore connector
+    word/comma/adhoore-word pe khatam ho raha ho (chahe finish_reason kuch bhi ho). Ye
+    check aisa jawab user ko bhejne se pehle hi reject kar deta hai.
 
     Ek aur cheez check karta hai: kabhi weak model user ki hi baat thoda ghuma-firaake
     wapas bhej deta hai (jaise 'Ager nhi bheja to' -> 'Ager nahi bheja') - ye koi jawab
@@ -1696,7 +1761,12 @@ def is_usable_reply(text, finish_reason=None, user_text=None):
     cleaned = text.strip()
     if len(cleaned) < 2:
         return False
-    if finish_reason == "length" and len(cleaned) < 15:
+    # finish_reason 'length' ka matlab hai model token-limit ki wajah se beech mein hi
+    # kata gaya - ye khud hi ek pakka signal hai ki jawab adhoora hai, chahe wo kitna bhi
+    # lamba kyun na dikhe.
+    if finish_reason == "length":
+        return False
+    if ends_incomplete(cleaned):
         return False
     if looks_like_leaked_reasoning(cleaned):
         return False
@@ -1826,7 +1896,7 @@ def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
         providers = [
             ("groq", lambda: _try_groq_chat(messages_for_ai)),
             ("gemini", lambda: _try_gemini_chat(messages_for_ai)),
-            ("openrouter", lambda: _try_openai_compatible_chat("openrouter", call_openrouter, messages_for_ai)),
+            ("openrouter", lambda: _try_openai_compatible_chat("openrouter", call_openrouter, messages_for_ai, {"reasoning": {"exclude": True}})),
             ("mistral", lambda: _try_openai_compatible_chat("mistral", call_mistral, messages_for_ai)),
             ("cerebras", lambda: _try_openai_compatible_chat("cerebras", call_cerebras, messages_for_ai, {"reasoning_format": "hidden"})),
             ("deepseek", lambda: _try_openai_compatible_chat("deepseek", call_deepseek, messages_for_ai)),
