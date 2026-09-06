@@ -10,6 +10,7 @@ import io
 import wave
 import threading
 import difflib
+import json
 
 app = Flask(__name__)
 
@@ -66,7 +67,9 @@ Zaroori niyam:
 - Kabhi bhi kisi purane message ko "explain" ya "iska matlab tha" jaisa describe mat karo - agar context diya gaya hai to bas use samajhkar seedha jawab do, jaise tumhe pehle se pata tha kis baat pe baat ho rahi hai.
 - Consistency rakho - tumhara tone, mood, aur andaz har reply mein same rehna chahiye, chahe jawab kahin se bhi (kisi bhi AI backend se) aaya ho, kabhi Khan se alag feel nahi hona chahiye.
 
-BAHUT ZAROORI - YE HI SABSE BADI GALTI HAI JO NAHI KARNI: Har reply ke end mein sawaal ya prompt mat jodo (jaise "bata dena", "kya chal raha hai tera", "koi baat ho toh bata", "kabhi time mile toh milte hain"). Ek real dost HAR baat pe follow-up sawaal nahi poochta - kabhi bas baat khatam ho jaati hai, kabhi ek chhota reaction hi kaafi hota hai. Jab user "Hm", "Acha", "Ok", "Thik hai" jaisa short/neutral reply de, to iska matlab wo baat wahin chhodna chahta hai - tab bas ek chhota natural reaction do (jaise "👍", "Chal", "Theek", "Hmm" - kabhi emoji akela bhi bhej sakte ho) - dobara sawaal mat poocho, dobara conversation continue karne ki koshish mat karo. Sirf tab sawaal poocho jab genuinely poochna banta ho (user ne khud kuch aadha chhoda ho ya seedha kuch pucha ho) - har reply ko ek "conversation hook" mat banao, warna AI jaisa lagta hai insaan jaisa nahi."""
+BAHUT ZAROORI - YE HI SABSE BADI GALTI HAI JO NAHI KARNI: Har reply ke end mein sawaal ya prompt mat jodo (jaise "bata dena", "kya chal raha hai tera", "koi baat ho toh bata", "kabhi time mile toh milte hain"). Ek real dost HAR baat pe follow-up sawaal nahi poochta - kabhi bas baat khatam ho jaati hai, kabhi ek chhota reaction hi kaafi hota hai. Jab user "Hm", "Acha", "Ok", "Thik hai" jaisa short/neutral reply de, to iska matlab wo baat wahin chhodna chahta hai - tab bas ek chhota natural reaction do (jaise "👍", "Chal", "Theek", "Hmm" - kabhi emoji akela bhi bhej sakte ho) - dobara sawaal mat poocho, dobara conversation continue karne ki koshish mat karo. Sirf tab sawaal poocho jab genuinely poochna banta ho (user ne khud kuch aadha chhoda ho ya seedha kuch pucha ho) - har reply ko ek "conversation hook" mat banao, warna AI jaisa lagta hai insaan jaisa nahi.
+
+Agar koi aisi cheez maange jo tum (Khan) waqai nahi kar sakte (jaise real call karna, kisi ki live location batana, paisa bhejna, real duniya mein koi kaam karna), to seedha aur saaf bata do ki ye nahi kar sakte - ghumakar jawab mat do, jhooth mat bolo ki kar diya, aur bina wajah excuses mat banao."""
 
 DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
 
@@ -1064,8 +1067,53 @@ def handle_modbtn(subaction, chat_id, target_id):
         if count > 0:
             count = count - 1
         chat_warns[target_id] = count
+        save_state()
         return "Warning kam kar di gayi. Ab count: " + str(count) + "/3"
     return "Kuch nahi hua."
+
+
+STATE_FILE = "/tmp/khan_bot_state.json"
+
+
+def save_state():
+    """warnings aur moderation_records ko disk pe save karta hai - taaki bot restart
+    (Render free tier ka spin-down/wake, ya koi crash) hone par bhi purani warning
+    counts aur ban/mute history yaad rahe, sirf memory pe depend na rahe."""
+    try:
+        data = {
+            "warnings": {str(cid): {str(uid): c for uid, c in warns.items()} for cid, warns in warnings.items()},
+            "moderation_records": {
+                str(cid): {
+                    "banned": {str(uid): name for uid, name in rec.get("banned", {}).items()},
+                    "muted": {str(uid): name for uid, name in rec.get("muted", {}).items()},
+                }
+                for cid, rec in moderation_records.items()
+            },
+        }
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print("STATE SAVE ERROR: " + str(e))
+
+
+def load_state():
+    """Bot start hote hi purana saved state wapas load karta hai."""
+    global warnings, moderation_records
+    try:
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
+        for cid_str, warns in data.get("warnings", {}).items():
+            warnings[int(cid_str)] = {int(uid): c for uid, c in warns.items()}
+        for cid_str, rec in data.get("moderation_records", {}).items():
+            moderation_records[int(cid_str)] = {
+                "banned": {int(uid): name for uid, name in rec.get("banned", {}).items()},
+                "muted": {int(uid): name for uid, name in rec.get("muted", {}).items()},
+            }
+        print("STATE LOADED: " + str(len(warnings)) + " chats ki warnings, " + str(len(moderation_records)) + " chats ka mod-record")
+    except FileNotFoundError:
+        print("STATE FILE nahi mila - fresh start")
+    except Exception as e:
+        print("STATE LOAD ERROR: " + str(e))
 
 
 def record_moderation(chat_id, kind, user_id, name):
@@ -1076,6 +1124,7 @@ def record_moderation(chat_id, kind, user_id, name):
         chat_records["muted"].pop(user_id, None)
     elif kind == "mute":
         chat_records["muted"][user_id] = name
+    save_state()
 
 
 def unrecord_moderation(chat_id, kind, user_id):
@@ -1087,23 +1136,48 @@ def unrecord_moderation(chat_id, kind, user_id):
         chat_records["banned"].pop(user_id, None)
     elif kind == "mute":
         chat_records["muted"].pop(user_id, None)
+    save_state()
+
+
+def telegram_api_ok(response):
+    """Telegram API ka response check karta hai ki action asal mein successful hua ya
+    nahi. Pehle isko check nahi kiya jaata tha - isliye agar bot ke paas permission na
+    ho (jaise 'Restrict Members' off ho), to bhi bot khushi khushi 'ban kar diya' bol
+    deta tha jabki asal mein kuch hua hi nahi tha."""
+    try:
+        data = response.json()
+        return data.get("ok", False), data.get("description", "")
+    except Exception:
+        return False, "response parse nahi hua"
 
 
 def do_moderation_action(action, chat_id, target_id, target_name=None):
     if not target_name:
         target_name = "ye banda"
     if action == "ban":
-        requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+        r = requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+        ok, desc = telegram_api_ok(r)
+        if not ok:
+            print("BAN FAILED: " + desc)
+            return (target_name + " ko ban nahi kar paaya - shayad mujhe 'Restrict Members' permission nahi mili hai. (" + desc + ")", "fail")
         record_moderation(chat_id, "ban", target_id, target_name)
         return (target_name + " ko ban kar diya gaya.", "ban")
     elif action == "kick":
-        requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+        r = requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+        ok, desc = telegram_api_ok(r)
+        if not ok:
+            print("KICK FAILED: " + desc)
+            return (target_name + " ko nikaal nahi paaya - shayad mujhe 'Restrict Members' permission nahi mili hai. (" + desc + ")", "fail")
         requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
         return (target_name + " ko nikaal diya gaya.", "kick")
     elif action == "mute":
-        requests.post(TELEGRAM_URL + "/restrictChatMember", json={
+        r = requests.post(TELEGRAM_URL + "/restrictChatMember", json={
             "chat_id": chat_id, "user_id": target_id, "permissions": {"can_send_messages": False}
         }, timeout=10)
+        ok, desc = telegram_api_ok(r)
+        if not ok:
+            print("MUTE FAILED: " + desc)
+            return (target_name + " ko mute nahi kar paaya - shayad mujhe 'Restrict Members' permission nahi mili hai. (" + desc + ")", "fail")
         record_moderation(chat_id, "mute", target_id, target_name)
         return (target_name + " ko mute kar diya gaya.", "mute")
     elif action == "unmute":
@@ -1118,9 +1192,15 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
         chat_warns = warnings.setdefault(chat_id, {})
         count = chat_warns.get(target_id, 0) + 1
         chat_warns[target_id] = count
+        save_state()
         if count >= 3:
-            requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+            r = requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
+            ok, desc = telegram_api_ok(r)
+            if not ok:
+                print("WARN-BAN FAILED: " + desc)
+                return (target_name + " ki 3 warning ho gayi thi, lekin ban nahi kar paaya - shayad mujhe 'Restrict Members' permission nahi mili hai. (" + desc + ")", "fail")
             chat_warns[target_id] = 0
+            save_state()
             record_moderation(chat_id, "ban", target_id, target_name)
             return (target_name + " ki 3 warning ho gayi, ban kar diya.", "ban")
         return (target_name + " ko warning di gayi (" + str(count) + "/3)", "warn")
@@ -1304,6 +1384,7 @@ def handle_unwarn(chat_id, message):
         send_message(chat_id, get_name(target) + " ki koi warning hi nahi hai.")
         return
     chat_warns[target['id']] = current - 1
+    save_state()
     send_message(chat_id, get_name(target) + " ki 1 warning kam kar di. Ab: " + str(chat_warns[target['id']]) + "/3")
 
 
@@ -1663,6 +1744,12 @@ REASONING_LEAK_MARKERS = [
     "the user is asking", "the user said:", "1. **analyze", "let's see", "let's see.",
     "looking at the history", "so the user is", "according to the rules",
     "the user is kind of", "okay, let's", "okay let's", "i shouldn't add",
+    # Hamari apni system prompt/context-note ke unique lines - agar ye kabhi bhi
+    # jawab mein dikhein, matlab bot ne apna hi internal instruction leak kar diya.
+    "sabse zaroori niyam", "har reply maximum 2 lines", "sirf background context ke liye",
+    "isko explain ya describe mat karna", "web se ye real aur latest jaankari",
+    "ye jaankari live search se nahi", "tum \"khan\" ho, ek dost",
+    "bahut zaroori - ye hi sabse badi galti",
 ]
 
 
@@ -2297,5 +2384,6 @@ def home():
 
 
 if __name__ == '__main__':
+    load_state()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
