@@ -109,13 +109,16 @@ def build_welcome_message(settings, user_id, name, group_name="is group"):
 def build_leave_message(user_id, name, group_name):
     mention = mention_html(user_id, name)
     return mention + " ne " + escape_html(group_name) + " se leave kar diya 👋"
-LINK_PATTERN = re.compile(r'(https?://|www\.|t\.me/|telegram\.me/)', re.IGNORECASE)
+LINK_PATTERN = re.compile(
+    r'(https?://|www\.|t\.me/|telegram\.me/|\b[a-z0-9-]+\.(com|net|org|in|io|co|xyz|me|link|club|shop|online|site|info|biz|app)\b)',
+    re.IGNORECASE
+)
 MENTION_PATTERN = re.compile(r'@(\w{4,})')  # @username tag karna - 4+ chars, real Telegram usernames kam se kam 5 ke hote hain
 
 DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
 DM_DISCLAIMER = "DM mein hone wale kisi bhi spam/scam ki zimmedari group ya admin ki nahi hogi, khud dhyan rakhna bhai."
 
-BAD_WORDS = set([
+BAD_WORDS = [
     "chutiya", "chutia", "chutiye", "chutiyapa",
     "madarchod", "mc", "behenchod", "bhenchod", "bc",
     "bhosdike", "bhosdi", "bhosda",
@@ -126,7 +129,18 @@ BAD_WORDS = set([
     "bsdk", "bkl",
     "fuck", "fucker", "fucking", "motherfucker",
     "bitch", "asshole", "bastard", "slut", "whore", "cunt", "dick", "pussy"
-])
+]
+
+
+def _word_evasion_pattern(word):
+    """Har letter ko uska exact letter YA koi bhi ek symbol/number (censor) se match
+    karta hai - isse 'ch*tiya', 'ch#tiya', 'ch1tiya', 'g@nd' jaise jaan-bujhkar
+    censor/evade kiye hue spellings bhi pakde jaate hain, sirf exact spelling nahi."""
+    parts = [r'(?:' + re.escape(ch) + r'|[^a-zA-Z])' for ch in word]
+    return re.compile(r'(?<![a-zA-Z])' + ''.join(parts) + r'(?![a-zA-Z])', re.IGNORECASE)
+
+
+BAD_WORD_PATTERNS = [_word_evasion_pattern(w) for w in BAD_WORDS]
 
 def mentions_khan(text):
     cleaned = re.sub(r'[^a-zA-Z\s]', ' ', text.lower())
@@ -161,10 +175,8 @@ def wants_image(text):
 
 
 def contains_bad_word(text):
-    cleaned = re.sub(r'[^a-zA-Z\s]', '', text.lower())
-    tokens = cleaned.split()
-    for t in tokens:
-        if t in BAD_WORDS:
+    for pattern in BAD_WORD_PATTERNS:
+        if pattern.search(text):
             return True
     return False
 
@@ -445,23 +457,34 @@ def handle_message(message):
 
     # ---- Link / @mention / gaali - sabpe auto-warn (commands jaise "/ban @user" exempt hain) ----
     if not text.startswith('/'):
-        is_privileged = is_owner(user_id) or safe_check_admin(chat_id, user_id)
+        is_owner_user = is_owner(user_id)
+        is_privileged = is_owner_user or safe_check_admin(chat_id, user_id)
 
+        # Link: sabke liye ban hai - Owner ke alawa KOI exempt nahi, chahe Admin hi kyu na ho.
         has_link = settings.get('link_filter', True) and bool(LINK_PATTERN.search(text))
-        mention_match = MENTION_PATTERN.search(text)
-        has_mention = bool(mention_match) and mention_match.group(1).lower() != BOT_USERNAME.lower()
-
-        if (has_link or has_mention) and not is_privileged:
+        if has_link and not is_owner_user:
             try:
                 requests.post(TELEGRAM_URL + "/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
             except Exception as e:
-                print("AUTO-DELETE ERROR: " + str(e))
+                print("LINK DELETE ERROR: " + str(e))
+            name = get_name(message.get('from', {}))
+            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
+            return
+
+        # @mention: Owner/Admin exempt (moderation ke liye kabhi zaroori hota hai)
+        mention_match = MENTION_PATTERN.search(text)
+        has_mention = bool(mention_match) and mention_match.group(1).lower() != BOT_USERNAME.lower()
+        if has_mention and not is_privileged:
+            try:
+                requests.post(TELEGRAM_URL + "/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
+            except Exception as e:
+                print("MENTION DELETE ERROR: " + str(e))
             name = get_name(message.get('from', {}))
             safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
             return
 
         # ---- Gaali filter (owner exempt) - message delete + warning dono ----
-        if not is_owner(user_id) and contains_bad_word(text):
+        if not is_owner_user and contains_bad_word(text):
             try:
                 requests.post(TELEGRAM_URL + "/deleteMessage", json={"chat_id": chat_id, "message_id": message_id}, timeout=10)
             except Exception as e:
@@ -1801,6 +1824,11 @@ SAFE_SHORT_ENDING_WORDS = {
     "hogi", "kal", "ab", "hi", "wah", "are", "abe", "oye", "kab", "sab", "tab", "jab",
     "aaj", "abhi", "phir", "chal", "chalo", "ruk", "dekh", "sun", "bata", "acha",
     "accha", "theek", "thik", "sahi", "galat", "kaisa", "kaisi", "kaise",
+    # 3-letter common valid endings (English + Hinglish) - taaki inhe galti se
+    # "truncated word" na samjha jaaye
+    "bye", "wow", "yes", "yep", "nah", "lol", "omg", "aap", "hum", "kar",
+    "abb", "kro", "bro", "sis", "bas", "aya", "aye", "gai", "gaa", "aha",
+    "hey", "hii", "wat", "raw", "big", "old", "new", "top", "fun",
 }
 
 
