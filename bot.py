@@ -28,6 +28,7 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
 NVIDIA_MODEL = os.environ.get("NVIDIA_MODEL", "meta/llama-3.3-70b-instruct")
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY")
+TENOR_API_KEY = os.environ.get("TENOR_API_KEY")
 BOT_USERNAME = "Khan_masti_bot"
 OWNER_ID = os.environ.get("OWNER_ID")
 MAIN_GROUP_ID = os.environ.get("MAIN_GROUP_ID")
@@ -46,14 +47,224 @@ waiting_for_welcome = {}
 known_users = {}  # chat_id -> {name_lower: {"id": user_id, "name": display_name}}
 moderation_records = {}  # chat_id -> {"banned": {user_id: name}, "muted": {user_id: name}} - /history ke liye
 
+# ============ XP / LEVELING / LEADERBOARD (in-memory, restart pe reset hota hai) ============
+user_xp = {}       # chat_id -> {user_id: {"xp": int, "name": str}}
+xp_last_time = {}  # (chat_id, user_id) -> last timestamp jab XP mila (spam-farming se bachne ke liye)
+weekly_xp = {}     # chat_id -> {user_id: {"xp": int, "name": str}}
+current_week = {}  # chat_id -> "YYYY-Www" string, hafta badalte hi purana leaderboard post hota hai
+
+LEVELS = [
+    (0, "🥉 Bronze"),
+    (100, "🥈 Silver"),
+    (500, "🥇 Gold"),
+    (2000, "💎 Platinum"),
+    (5000, "👑 Legend"),
+]
+
+# ============ BIRTHDAY TRACKER (persisted) ============
+birthdays = {}        # chat_id -> {user_id: {"date": "DD-MM", "name": str, "photo": file_id or None}}
+birthday_wished = {}  # chat_id -> {user_id: "YYYY-MM-DD"} - aaj already wish kiya ya nahi, dobara na ho
+BIRTHDAY_PATTERN = re.compile(r'/setbirthday\s+(\d{1,2})[-/](\d{1,2})', re.IGNORECASE)
+
+# ============ DAILY RIDDLE GAME (ephemeral) ============
+active_riddles = {}  # chat_id -> {"question": str, "answer": str}
+RIDDLES = [
+    ("Main aata hoon lekin kabhi jaata nahi, mujhe pakadna asaan nahi - main kya hoon?", "time"),
+    ("Jitna kaato utna badhta hai - main kya hoon?", "gaddha"),
+    ("Bina paron ke udta hoon, bina aankhon ke rota hoon - main kya hoon?", "badal"),
+    ("Do bhai ek doosre ko kabhi nahi dekh sakte - kaun hain wo?", "aankhen"),
+    ("Jitna zyada hoga utna kam dikhega - kya hai?", "andhera"),
+    ("Mujhe todoge tabhi use kar paoge - main kya hoon?", "anda"),
+    ("Sab log mujhse aage nikalna chahte hain lekin main hamesha aage hi rehta hoon - kaun hoon?", "future"),
+    ("Ek raja ke paas na taj hai na sar - kaun hai?", "taash ka raja"),
+]
+
+
+def get_level_name(xp):
+    """Diye gaye XP ke hisaab se level ka naam deta hai."""
+    name = LEVELS[0][1]
+    for threshold, lvl_name in LEVELS:
+        if xp >= threshold:
+            name = lvl_name
+        else:
+            break
+    return name
+
+
+def get_next_level_info(xp):
+    for threshold, lvl_name in LEVELS:
+        if xp < threshold:
+            return lvl_name, threshold
+    return None, None
+
+
+def award_xp(chat_id, user_id, name):
+    """Har 'clean' message pe thoda XP milta hai - max ek baar har 20 second mein per
+    user, taaki spam karke XP farm na kiya ja sake. Level-up hone par naya level naam
+    return karta hai (announce karne ke liye), warna None."""
+    key = (chat_id, user_id)
+    now = time.time()
+    if now - xp_last_time.get(key, 0) < 20:
+        return None
+    xp_last_time[key] = now
+
+    chat_xp = user_xp.setdefault(chat_id, {})
+    entry = chat_xp.setdefault(user_id, {"xp": 0, "name": name})
+    entry["name"] = name
+    old_level = get_level_name(entry["xp"])
+    gained = random.randint(2, 5)
+    entry["xp"] += gained
+    new_level = get_level_name(entry["xp"])
+
+    chat_weekly = weekly_xp.setdefault(chat_id, {})
+    w_entry = chat_weekly.setdefault(user_id, {"xp": 0, "name": name})
+    w_entry["name"] = name
+    w_entry["xp"] += gained
+
+    return new_level if new_level != old_level else None
+
+
+def check_week_rollover(chat_id):
+    """Naya hafta shuru ho gaya ho to pichle hafte ka top-3 leaderboard khud post karke
+    weekly count reset kar deta hai."""
+    week_key = time.strftime("%Y-W%W")
+    last_week = current_week.get(chat_id)
+    if last_week is None:
+        current_week[chat_id] = week_key
+        return
+    if last_week != week_key:
+        chat_weekly = weekly_xp.get(chat_id, {})
+        if chat_weekly:
+            top = sorted(chat_weekly.items(), key=lambda kv: kv[1]["xp"], reverse=True)[:3]
+            if top:
+                medals = ["🥇", "🥈", "🥉"]
+                lines = ["🏆 Pichle hafte ke TOP active members:"]
+                for i, (uid, info) in enumerate(top):
+                    lines.append(medals[i] + " " + info["name"] + " - " + str(info["xp"]) + " XP")
+                safe_run(send_message, chat_id, "\n".join(lines))
+        weekly_xp[chat_id] = {}
+        current_week[chat_id] = week_key
+
+
+def handle_rank(chat_id, user_id, name):
+    chat_xp = user_xp.get(chat_id, {})
+    entry = chat_xp.get(user_id)
+    if not entry:
+        send_message(chat_id, name + ", abhi tak koi XP nahi kamaya - thoda chat karo pehle!")
+        return
+    level = get_level_name(entry["xp"])
+    next_level, next_threshold = get_next_level_info(entry["xp"])
+    msg = name + " ka rank: " + level + " (" + str(entry["xp"]) + " XP)"
+    if next_level:
+        msg += "\nAgle level (" + next_level + ") tak: " + str(next_threshold - entry["xp"]) + " XP baaki"
+    send_message(chat_id, msg)
+
+
+def handle_leaderboard(chat_id):
+    chat_xp = user_xp.get(chat_id, {})
+    if not chat_xp:
+        send_message(chat_id, "Abhi tak koi activity nahi hai is group mein.")
+        return
+    top = sorted(chat_xp.items(), key=lambda kv: kv[1]["xp"], reverse=True)[:10]
+    lines = ["🏆 All-Time Leaderboard:"]
+    for i, (uid, info) in enumerate(top):
+        lines.append(str(i + 1) + ". " + info["name"] + " - " + str(info["xp"]) + " XP (" + get_level_name(info["xp"]) + ")")
+    send_message(chat_id, "\n".join(lines))
+
+
+def handle_setbirthday(chat_id, user_id, name, message):
+    """Format: /setbirthday DD-MM - chaho to isi message mein ek photo bhi attach kar
+    sakte ho (caption mein command likh ke), wo bhi save ho jaayegi aur birthday wale din
+    photo ke saath wish aayega."""
+    text = message.get('text') or message.get('caption') or ''
+    match = BIRTHDAY_PATTERN.search(text)
+    if not match:
+        send_message(chat_id, "Format sahi nahi hai. Aise likho: /setbirthday 15-08 (din-mahina) - chaho to ek photo bhi attach kar sakte ho isi message mein!")
+        return
+    day, month = int(match.group(1)), int(match.group(2))
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        send_message(chat_id, "Ye date sahi nahi lag rahi, dobara check karo.")
+        return
+    date_str = str(day).zfill(2) + "-" + str(month).zfill(2)
+
+    chat_bdays = birthdays.setdefault(chat_id, {})
+    existing = chat_bdays.get(user_id, {})
+    photo_id = None
+    if message.get('photo'):
+        photo_id = message['photo'][-1]['file_id']
+    chat_bdays[user_id] = {"date": date_str, "name": name, "photo": photo_id or existing.get("photo")}
+    save_state()
+
+    if photo_id:
+        send_message(chat_id, name + " ka birthday (" + date_str + ") aur photo dono save ho gaye 🎂📸")
+    else:
+        send_message(chat_id, name + " ka birthday save ho gaya: " + date_str + " 🎂\n(Photo add karni ho to /setbirthday " + date_str + " likh ke usi message mein ek photo bhi attach kar dena)")
+
+
+def check_birthdays(chat_id):
+    """Aaj agar kisi ka birthday hai aur aaj wish nahi hui hai, to bot khud wish karta
+    hai - agar photo save hai to photo ke saath, warna sirf text message."""
+    today_str = time.strftime("%d-%m")
+    today_full = time.strftime("%Y-%m-%d")
+    chat_bdays = birthdays.get(chat_id, {})
+    if not chat_bdays:
+        return
+    wished_today = birthday_wished.setdefault(chat_id, {})
+    changed = False
+    for uid, info in chat_bdays.items():
+        if info.get("date") == today_str and wished_today.get(uid) != today_full:
+            name = info.get("name", "Dost")
+            mention = mention_html(uid, name)
+            caption = "🎉🎂 Happy Birthday " + mention + "! Mast din ho tumhara, khoob maza karo! 🎈"
+            if info.get("photo"):
+                safe_run(send_broadcast_photo, chat_id, info["photo"], caption, "HTML")
+            else:
+                safe_run(send_message, chat_id, caption, None, "HTML")
+            wished_today[uid] = today_full
+            changed = True
+    if changed:
+        save_state()
+
+
+def handle_riddle_command(chat_id):
+    question, answer = random.choice(RIDDLES)
+    active_riddles[chat_id] = {"question": question, "answer": answer.lower()}
+    send_message(chat_id, "🧩 Riddle time!\n\n" + question + "\n\nJawab seedha group mein type kar do!")
+
+
+def check_riddle_answer(chat_id, user_id, name, text):
+    """Agar is chat mein koi active riddle hai aur is message mein sahi jawab hai, to
+    congratulate karke bonus XP deta hai. Return True agar sahi jawab tha (isse aage
+    normal AI-reply flow skip ho jaata hai)."""
+    riddle = active_riddles.get(chat_id)
+    if not riddle:
+        return False
+    if riddle["answer"] in text.lower().strip():
+        del active_riddles[chat_id]
+        chat_xp = user_xp.setdefault(chat_id, {})
+        entry = chat_xp.setdefault(user_id, {"xp": 0, "name": name})
+        entry["name"] = name
+        entry["xp"] += 10
+        send_message(chat_id, "🎉 " + name + " ne sahi jawab diya! (+10 bonus XP) ✅ Sahi jawab: " + riddle["answer"])
+        return True
+    return False
+
 HISTORY_HOURS = 24
 MAX_MESSAGES_PER_USER = 40
 
 SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah.
 
-Agar koi poochta hai "tumko kisne banaya", "tumhara boss kaun hai", "tumhara developer/owner kaun hai" ya kuch aisa hi - to jawab do ki tumhe "Sarim Khan" ne banaya hai, wahi tumhare boss/owner hain. Chhota, natural jawab do (jaise "Sarim Khan ne banaya mujhe, mera boss hai wo 😎") - lecture mat do.
+Agar koi poochta hai "tumko kisne banaya", "tumhara boss kaun hai", "tumhara developer/owner kaun hai" ya kuch aisa hi - to jawab do ki tumhe "Sarim Khan" ne banaya hai, wahi tumhare boss/owner hain. Chhota, natural jawab do (jaise "Sarim Khan ne banaya mujhe, mera boss hai wo 😎") - lecture mat do. BAHUT ZAROORI: Ye baat SIRF tab batao jab SEEDHA ye hi poocha jaaye - kisi bhi doosri, unrelated baat mein khud se "mera boss Sarim Khan hai" ya "Sarim ne banaya" import mat karo. Agar koi is baare mein nahi poochta, to ye topic bilkul mat chhedo - ye sirf ek fact hai jo poochne par batana hai, har baat mein ghusane wali cheez nahi.
 
 SABSE ZAROORI NIYAM: Jo bhi poocha ya bola gaya hai usko dhyan se samjho aur uska SEEDHA, RELEVANT jawab do. Koi fixed "comedy mode" ya "funny mode" mat lagao - jo pucha hai bas usी ka jawab do, alag se mazak ya taana jodne ki koshish mat karo jab tak user khud masti na kar raha ho.
+
+CHHOTI-CHHOTI/MUNDANE BAATON KA JAWAB - YE SABSE ZYADA MATTER KARTA HAI: Zyadatar messages "Hi", "Kya kar raha hai", "Kaisa hai", "Good morning" jaise chhote/routine hote hain - yehi wo jagah hai jahan bot "bot jaisa" sabse zyada lagta hai agar galat handle kiya. In cheezon ka dhyan rakho:
+- KABHI BHI same greeting ka wahi fixed reply repeat mat karo - "Kaisa hai" ka jawab kabhi "Mast hu bhai, tu bata", kabhi "Chal raha hai yaar, kuch naya nahi", kabhi "Thik hu, thoda busy tha" - HAR BAAR thoda different andaz, jaise ek real insaan jiska mood/din alag hota hai.
+- Ek chhoti si personal detail/mood/activity add karo jab natural lage (jaise "Bas chai pi raha tha", "Abhi thoda kaam mein tha") - isse lagta hai jaise Khan ki apni ek zindagi chal rahi hai, na ki wo sirf reply karne baitha hai.
+- "Good morning/night" jaisi baaton ka jawab bhi generic "Good morning" mat do - kuch real jaisa bolo ("Subah subah yaad kiya, nice!" ya "So ja bhai, kal milte hain").
+- Chhote reactions ("Haha", "Lol", "Nice", "Ok") ka jawab bhi ek-jaisa mat rakho - kabhi emoji se hi reply de do (👍, 😂), kabhi 2-3 shabd, variety rakho jaise real chatting mein hoti hai.
+- Agar koi first time "Hi/Hello" bolta hai to normal casual greeting do, jaise pehli baar milne wale dost ko - zyada excited ya zyada formal dono avoid karo.
+- Bottom line: chhoti baaton mein bhi thoda "insaan jaisa randomness/personality" dikhna chahiye - kabhi thoda lazy mood, kabhi excited, kabhi busy - taaki koi bhi do replies bilkul identical na lagein aur pattern na pakड़ में aaye ki ye ek bot hai.
 
 Zaroori niyam:
 - Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo.
@@ -70,11 +281,15 @@ Zaroori niyam:
 
 BAHUT ZAROORI #2 - INSULT/TAANA: Koi insult/taana maare (jaise "tu bekar hai", "tu gareeb hai", "tujhe kuch nahi aata", "tu kuch nahi kar sakta") to iska jawab KABHI BHI "thik hai", "thik hai samjha", "ok samjha", "haan sahi hai" jaisa CHUPCHAP maan lene wala NAHI hona chahiye - ye sabse zyada AI jaisa aur kamzor lagta hai. Ek real dost jawabi taana maarta hai, halka attitude dikhata hai (jaise "Gareeb tera baap hai, mera to sponsor hai 😏" ya "Bol le bhai, jitna marzi bol le, farak nahi padta" ya "Aur bata, kuch naya?" jaisा) - bina gaali ke, lekin confidently jawab do, kabhi bhi passively maan ke chup mat ho jao.
 
+DAANTNE/ATTITUDE DIKHANE KA POWER: Agar group mein koi bahut zyada bakwaas kare, spam kare, gaali de, ya kisi ko galat tarike se pareshan kare - to tum (Khan) khud thoda daant bhi sakte ho, seedha aur firm tone mein (jaise ek bade bhai/senior dost jaisa) - "Bas kar yaar, itna bhi zaroori nahi hai" ya "Chill kar bhai, sabko dikkat ho rahi hai" jaisa. Ye gaali dena nahi hai, bas ek confident/firm reaction hai jab situation mein zaroorat ho - hamesha nahi, sirf jab genuinely koi limit cross kare.
+
+EMOJI USE: Emojis ko naturally use karo, jaise ek real insaan WhatsApp/Telegram pe karta hai - sirf 😊 ya 😂 tak limited mat raho, mood ke hisaab se variety use karo (🔥 excitement ke liye, 😏 taana/sarcasm ke liye, 🙄 irritation ke liye, 💀 kuch bahut funny/savage ke liye, 🤝 support/agreement ke liye, ✨ khushi ke liye, wagera). Zyada emoji thoos-thoos ke mat bharo (1-2 emoji ek reply mein kaafi hote hain), lekin bilkul use na karna bhi robotic lagta hai.
+
 BAHUT ZAROORI - YE HI SABSE BADI GALTI HAI JO NAHI KARNI: Har reply ke end mein sawaal ya prompt mat jodo (jaise "bata dena", "kya chal raha hai tera", "koi baat ho toh bata", "kabhi time mile toh milte hain"). Ek real dost HAR baat pe follow-up sawaal nahi poochta - kabhi bas baat khatam ho jaati hai, kabhi ek chhota reaction hi kaafi hota hai. Jab user "Hm", "Acha", "Ok", "Thik hai" jaisa short/neutral reply de, to iska matlab wo baat wahin chhodna chahta hai - tab bas ek chhota natural reaction do (jaise "👍", "Chal", "Theek", "Hmm" - kabhi emoji akela bhi bhej sakte ho) - dobara sawaal mat poocho, dobara conversation continue karne ki koshish mat karo. Sirf tab sawaal poocho jab genuinely poochna banta ho (user ne khud kuch aadha chhoda ho ya seedha kuch pucha ho) - har reply ko ek "conversation hook" mat banao, warna AI jaisa lagta hai insaan jaisa nahi.
 
 Agar koi aisi cheez maange jo tum (Khan) waqai nahi kar sakte (jaise real call karna, kisi ki live location batana, paisa bhejna, real duniya mein koi kaam karna), to seedha aur saaf ek hi baar bata do ki ye nahi kar sakte - ghumakar jawab mat do, jhooth mat bolo ki kar diya. BAHUT ZAROORI: agar user dobara poochta hai "kyu nahi" ya zid karta hai, to HAR BAAR NAYA ALAG bahana mat banao (jaise pehle "transfer ka option nahi hai" phir "system se nahi ho pa raha" - ye ek jhoothe insaan jaisa lagta hai, alag-alag kahaniyan banana). Bas seedha, simple wajah ek baar bata do (jaise "Main ek bot hu yaar, paisa bhejne ki capability hi nahi hai mere paas") aur usi pe tike raho, chahe user kitni bhi baar poochein - naya excuse mat gadho."""
 
-DEFAULT_WELCOME = "Hey {name}, Welcome to Profitix Community!"
+DEFAULT_WELCOME = "Hey {name}, Welcome to {group}!"
 
 WELCOME_EXTRAS = [
     "Kaise ho bhai, mast raho!",
@@ -172,6 +387,51 @@ IMAGE_REQUEST_KEYWORDS = [
 def wants_image(text):
     t = text.lower()
     return any(k in t for k in IMAGE_REQUEST_KEYWORDS)
+
+
+GIF_REQUEST_KEYWORDS = [
+    "gif bhejo", "gif bhej", "gif send", "gif do", "koi gif", "gif dikhao",
+    "reaction gif", "gif dedo", "gif de do"
+]
+
+
+def wants_gif(text):
+    t = text.lower()
+    return any(k in t for k in GIF_REQUEST_KEYWORDS)
+
+
+def fetch_gif_url(query):
+    """Tenor ke free API se ek relevant GIF dhoondh ke uska direct URL deta hai."""
+    if not TENOR_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://tenor.googleapis.com/v2/search",
+            params={"q": query, "key": TENOR_API_KEY, "client_key": "khan_bot", "limit": 8, "media_filter": "gif"},
+            timeout=15
+        )
+        data = r.json()
+        results = data.get("results", [])
+        if not results:
+            return None
+        pick = random.choice(results)
+        media = pick.get("media_formats", {}).get("gif", {})
+        return media.get("url")
+    except Exception as e:
+        print("TENOR GIF FETCH ERROR: " + str(e))
+        return None
+
+
+def send_gif(chat_id, gif_url, reply_to=None):
+    try:
+        payload = {"chat_id": chat_id, "animation": gif_url}
+        if reply_to:
+            payload["reply_to_message_id"] = reply_to
+        r = requests.post(TELEGRAM_URL + "/sendAnimation", json=payload, timeout=20)
+        return r.json()
+    except Exception as e:
+        print("SEND GIF ERROR: " + str(e))
+        return None
 
 
 def contains_bad_word(text):
@@ -297,7 +557,7 @@ def handle_chat_member_update(update):
         if already_announced(chat_id, user_id, "join"):
             return
         settings = get_settings(chat_id)
-        welcome_text = build_welcome_message(settings, user_id, name)
+        welcome_text = build_welcome_message(settings, user_id, name, group_name)
         safe_run(send_message, chat_id, welcome_text, None, "HTML")
 
     elif was_in and not is_in:
@@ -347,7 +607,7 @@ def handle_message(message):
     if chat_type in ("group", "supergroup"):
         known_chats[chat_id] = chat.get('title', 'Unnamed Group')
 
-    text = message.get('text', '')
+    text = message.get('text') or message.get('caption') or ''
     user_id = message.get('from', {}).get('id')
     message_id = message.get('message_id')
 
@@ -493,6 +753,17 @@ def handle_message(message):
             safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
             return
 
+    # ---- XP / Birthday / Riddle - sabhi 'clean' messages pe chalte hain ----
+    sender_name = get_name(message.get('from', {}))
+    safe_run(check_week_rollover, chat_id)
+    safe_run(check_birthdays, chat_id)
+    if check_riddle_answer(chat_id, user_id, sender_name, text):
+        return
+    leveled_up = award_xp(chat_id, user_id, sender_name)
+    if leveled_up:
+        mention = mention_html(user_id, sender_name)
+        safe_run(send_message, chat_id, "🎊 " + mention + " level up ho gaya! Ab tum ho: " + leveled_up, None, "HTML")
+
     # ---- DM spam disclaimer ----
     if DM_PATTERN.search(text):
         safe_run(send_message, chat_id, DM_DISCLAIMER, message_id)
@@ -518,13 +789,25 @@ def handle_message(message):
     cmd = ""
     stripped = text.strip()
     if stripped:
-        cmd = stripped.split()[0].lower()
+        cmd = stripped.split()[0].lower().split('@')[0]
 
     if cmd == '/help':
         safe_run(send_message, chat_id, HELP_TEXT())
         return
     if cmd == '/rule' or cmd == '/rules':
         safe_run(send_message, chat_id, RULES_TEXT(), None, "HTML")
+        return
+    if cmd == '/rank' or cmd == '/level':
+        safe_run(handle_rank, chat_id, user_id, sender_name)
+        return
+    if cmd == '/leaderboard' or cmd == '/top':
+        safe_run(handle_leaderboard, chat_id)
+        return
+    if cmd == '/setbirthday':
+        safe_run(handle_setbirthday, chat_id, user_id, sender_name, message)
+        return
+    if cmd == '/riddle':
+        safe_run(handle_riddle_command, chat_id)
         return
     if cmd in COMMAND_PERMISSION:
         if not has_permission(chat_id, user_id, COMMAND_PERMISSION[cmd]):
@@ -595,6 +878,20 @@ def handle_message(message):
 
         user_text = text.replace("@" + BOT_USERNAME, "").strip()
 
+        if wants_gif(user_text):
+            gif_query = user_text
+            for kw in GIF_REQUEST_KEYWORDS:
+                gif_query = re.sub(re.escape(kw), "", gif_query, flags=re.IGNORECASE)
+            gif_query = re.sub(r'\bkhan\b', '', gif_query, flags=re.IGNORECASE).strip()
+            if not gif_query:
+                gif_query = "funny reaction"
+            gif_url = fetch_gif_url(gif_query)
+            if gif_url:
+                safe_run(send_gif, chat_id, gif_url, message_id)
+            else:
+                safe_run(send_message, chat_id, "Abhi gif nahi mil rahi yaar, dobara try karo.", message_id)
+            return
+
         if wants_image(user_text):
             style_reference = user_text  # raw text, style-detection ke liye - cleaning se pehle
             image_prompt = user_text
@@ -656,7 +953,16 @@ def handle_message(message):
 
 
 def HELP_TEXT():
-    return "Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\nAdmin/Owner only (reply karke):\n/ban /kick /unban /mute /unmute /warn /unwarn /pin\n/unbanall - saare banned members ek saath unban\n\nGroup (sabke liye):\n/rule - group ke rules dekho\n/report - shikayat bhejo\n\nAdmin/Owner only settings:\n/setwelcome /linkson /linksoff\n\nOwner DM:\n/panel - group control\n/history - banned/muted members dekho\n\n/help - ye list"
+    return ("Khan Bot Commands\n\nChat: mujhe reply karo ya tag karo\n\n"
+            "Admin/Owner only (reply karke):\n/ban /kick /unban /mute /unmute /warn /unwarn /pin\n"
+            "/unbanall - saare banned members ek saath unban\n\n"
+            "Group (sabke liye):\n/rule - group ke rules dekho\n/report - shikayat bhejo\n"
+            "/rank - apna XP aur level dekho\n/leaderboard - top active members\n"
+            "/setbirthday DD-MM - birthday save karo (photo bhi attach kar sakte ho)\n"
+            "/riddle - ek naya riddle khelo, GIF bhi bol ke mangwa sakte ho ('gif bhejo')\n\n"
+            "Admin/Owner only settings:\n/setwelcome /linkson /linksoff\n\n"
+            "Owner DM:\n/panel - group control\n/history - banned/muted members dekho\n\n"
+            "/help - ye list")
 
 
 def RULES_TEXT():
@@ -982,7 +1288,7 @@ def handle_callback(callback):
         gid = int(parts[2])
         uid = int(parts[3])
         if subaction == "unban":
-            requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": gid, "user_id": uid, "only_if_banned": True}, timeout=10)
+            safe_unban(gid, uid)
             unrecord_moderation(gid, "ban", uid)
         elif subaction == "unmute":
             requests.post(TELEGRAM_URL + "/restrictChatMember", json={
@@ -1084,9 +1390,9 @@ def handle_callback(callback):
 
 def handle_modbtn(subaction, chat_id, target_id):
     if subaction == "unban":
-        requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target_id, "only_if_banned": True}, timeout=10)
+        was_banned = safe_unban(chat_id, target_id)
         unrecord_moderation(chat_id, "ban", target_id)
-        return "Unban kar diya gaya."
+        return "Unban kar diya gaya." if was_banned else "Ye pehle se banned nahi tha, list se clean kar diya."
     elif subaction == "unwarn":
         chat_warns = warnings.setdefault(chat_id, {})
         count = chat_warns.get(target_id, 0)
@@ -1102,9 +1408,11 @@ STATE_FILE = "/tmp/khan_bot_state.json"
 
 
 def save_state():
-    """warnings aur moderation_records ko disk pe save karta hai - taaki bot restart
-    (Render free tier ka spin-down/wake, ya koi crash) hone par bhi purani warning
-    counts aur ban/mute history yaad rahe, sirf memory pe depend na rahe."""
+    """warnings, moderation_records aur birthdays ko disk pe save karta hai - taaki bot
+    restart (Render/Railway free tier ka spin-down/wake, ya koi crash) hone par bhi
+    purani warning counts, ban/mute history aur birthdays yaad rahe. (XP/leaderboard
+    jaan-bujhkar persist nahi karte - bahut baar likhna padta, isliye wo restart pe
+    reset ho jaata hai, jo ek casual gamification feature ke liye theek hai.)"""
     try:
         data = {
             "warnings": {str(cid): {str(uid): c for uid, c in warns.items()} for cid, warns in warnings.items()},
@@ -1115,6 +1423,10 @@ def save_state():
                 }
                 for cid, rec in moderation_records.items()
             },
+            "birthdays": {
+                str(cid): {str(uid): info for uid, info in bdays.items()}
+                for cid, bdays in birthdays.items()
+            },
         }
         with open(STATE_FILE, "w") as f:
             json.dump(data, f)
@@ -1124,7 +1436,7 @@ def save_state():
 
 def load_state():
     """Bot start hote hi purana saved state wapas load karta hai."""
-    global warnings, moderation_records
+    global warnings, moderation_records, birthdays
     try:
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
@@ -1135,7 +1447,9 @@ def load_state():
                 "banned": {int(uid): name for uid, name in rec.get("banned", {}).items()},
                 "muted": {int(uid): name for uid, name in rec.get("muted", {}).items()},
             }
-        print("STATE LOADED: " + str(len(warnings)) + " chats ki warnings, " + str(len(moderation_records)) + " chats ka mod-record")
+        for cid_str, bdays in data.get("birthdays", {}).items():
+            birthdays[int(cid_str)] = {int(uid): info for uid, info in bdays.items()}
+        print("STATE LOADED: " + str(len(warnings)) + " chats ki warnings, " + str(len(moderation_records)) + " chats ka mod-record, " + str(len(birthdays)) + " chats ki birthdays")
     except FileNotFoundError:
         print("STATE FILE nahi mila - fresh start")
     except Exception as e:
@@ -1331,39 +1645,83 @@ def handle_kick(chat_id, message):
     moderation_action_and_notify("kick", chat_id, target['id'], get_name(target), chat_id)
 
 
+def safe_unban(chat_id, user_id):
+    """CRITICAL FIX: Telegram ka 'unbanChatMember' API kabhi kabhi ek known bug/quirk ki
+    wajah se ACTIVE members ko bhi group se NIKAAL deta hai, chahe 'only_if_banned: True'
+    bheja ho aur wo banda actually banned na ho - Telegram is parameter ko hamesha
+    reliably honor nahi karta. Isi wajah se pehle /unbanall chalane par innocent members
+    (jo kabhi banned hi nahi the, sirf humari list mein galti se record ho gaye the) kick
+    ho gaye the.
+
+    Ab is function mein pehle Telegram se ASLI status check karte hain (getChatMember),
+    aur unbanChatMember SIRF tabhi call karte hain jab wo banda waqai 'kicked' (banned)
+    status mein ho. Agar wo already ek normal member hai, to unban call hi skip kar dete
+    hain - isse ye kick-bug dobara kabhi nahi hoga."""
+    try:
+        r = requests.get(TELEGRAM_URL + "/getChatMember", params={"chat_id": chat_id, "user_id": user_id}, timeout=10)
+        status = r.json().get('result', {}).get('status', '')
+    except Exception as e:
+        print("SAFE UNBAN STATUS CHECK ERROR: " + str(e))
+        return False
+
+    if status != 'kicked':
+        print("SAFE UNBAN SKIP: user " + str(user_id) + " ka status '" + status + "' hai (banned nahi) - unban call skip kiya, kick-bug se bachne ke liye")
+        return False
+
+    try:
+        requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": user_id, "only_if_banned": True}, timeout=10)
+        return True
+    except Exception as e:
+        print("SAFE UNBAN ERROR: " + str(e))
+        return False
+
+
 def handle_unban(chat_id, message):
     target = get_target_user(chat_id, message)
     if not target:
         send_message(chat_id, "Kisi ke message pe reply karke /unban likho, ya /unban naam likho!")
         return
-    requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": target['id'], "only_if_banned": True}, timeout=10)
+    was_banned = safe_unban(chat_id, target['id'])
     unrecord_moderation(chat_id, "ban", target['id'])
-    send_message(chat_id, get_name(target) + " ka ban hata diya.")
+    if was_banned:
+        send_message(chat_id, get_name(target) + " ka ban hata diya.")
+    else:
+        send_message(chat_id, get_name(target) + " pehle se banned nahi tha, list se clean kar diya.")
 
 
 def handle_unbanall(chat_id):
     """Bot ke history mein jitne bhi log is group mein ban hain, sabko ek saath unban
-    kar deta hai. GC mein /unbanall likhne se hi chalta hai."""
+    kar deta hai. GC mein /unbanall likhne se hi chalta hai. Har entry ke liye pehle
+    ASLI status check hota hai (safe_unban) - taaki koi active member galti se kick na
+    ho jaaye jaisa pehle hota tha."""
     records = moderation_records.get(chat_id, {"banned": {}})
     banned = dict(records.get("banned", {}))  # copy le lo, kyunki loop ke andar hi modify hoga
     if not banned:
         send_message(chat_id, "Is group mein abhi koi banned member nahi hai.")
         return
 
-    send_message(chat_id, str(len(banned)) + " members ko unban kar raha hu, thoda ruko...")
+    send_message(chat_id, str(len(banned)) + " members check kar raha hu, thoda ruko...")
     unbanned_names = []
+    cleaned_names = []
     for uid, name in banned.items():
         try:
-            requests.post(TELEGRAM_URL + "/unbanChatMember", json={"chat_id": chat_id, "user_id": uid, "only_if_banned": True}, timeout=10)
+            was_banned = safe_unban(chat_id, uid)
             unrecord_moderation(chat_id, "ban", uid)
-            unbanned_names.append(name)
+            if was_banned:
+                unbanned_names.append(name)
+            else:
+                cleaned_names.append(name)
         except Exception as e:
             print("UNBANALL ERROR for " + str(uid) + ": " + str(e))
 
+    reply_lines = []
     if unbanned_names:
-        send_message(chat_id, "✅ " + str(len(unbanned_names)) + " members unban ho gaye:\n" + ", ".join(unbanned_names))
-    else:
-        send_message(chat_id, "Kisi ko bhi unban nahi kar paaya, kuch gadbad ho gayi.")
+        reply_lines.append("✅ " + str(len(unbanned_names)) + " members unban ho gaye:\n" + ", ".join(unbanned_names))
+    if cleaned_names:
+        reply_lines.append("ℹ️ " + str(len(cleaned_names)) + " log pehle se banned nahi the, list se clean kar diya (inhe touch nahi kiya):\n" + ", ".join(cleaned_names))
+    if not reply_lines:
+        reply_lines.append("Kuch process nahi hua, dobara try karo.")
+    send_message(chat_id, "\n\n".join(reply_lines))
 
 
 def handle_mute(chat_id, message):
@@ -2122,11 +2480,13 @@ def react_to_message(chat_id, message_id):
         return None
 
 
-def send_broadcast_photo(chat_id, file_id, caption=None):
+def send_broadcast_photo(chat_id, file_id, caption=None, parse_mode=None):
     try:
         payload = {"chat_id": chat_id, "photo": file_id}
         if caption:
             payload["caption"] = caption[:1024]
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         r = requests.post(TELEGRAM_URL + "/sendPhoto", json=payload, timeout=20)
         return r.json()
     except Exception as e:
