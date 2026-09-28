@@ -47,18 +47,26 @@ waiting_for_welcome = {}
 known_users = {}  # chat_id -> {name_lower: {"id": user_id, "name": display_name}}
 moderation_records = {}  # chat_id -> {"banned": {user_id: name}, "muted": {user_id: name}} - /history ke liye
 
-# ============ XP / LEVELING / LEADERBOARD (in-memory, restart pe reset hota hai) ============
+# ============ XP / LEVELING / LEADERBOARD (persisted - sirf current XP number save hota hai) ============
 user_xp = {}       # chat_id -> {user_id: {"xp": int, "name": str}}
 xp_last_time = {}  # (chat_id, user_id) -> last timestamp jab XP mila (spam-farming se bachne ke liye)
 weekly_xp = {}     # chat_id -> {user_id: {"xp": int, "name": str}}
 current_week = {}  # chat_id -> "YYYY-Www" string, hafta badalte hi purana leaderboard post hota hai
+cmd_last_used = {}  # (chat_id, user_id, cmd) -> last timestamp - /rank aur /leaderboard ke cooldown ke liye
+CMD_COOLDOWN_SECONDS = 3600  # members ke liye /rank aur /leaderboard: 1 ghante mein sirf ek baar
 
+# Level SIRF XP number se calculate hota hai, alag se store nahi hota. Isliye jab koi Silver se
+# Gold pe jaata hai to "purana rank" ka koi record jama hi nahi hota - storage hamesha chhota rehta hai
+# (har member ka sirf ek chhota sa XP number).
 LEVELS = [
     (0, "🥉 Bronze"),
-    (100, "🥈 Silver"),
-    (500, "🥇 Gold"),
-    (2000, "💎 Platinum"),
-    (5000, "👑 Legend"),
+    (1000, "🥈 Silver"),
+    (3000, "🥇 Gold"),
+    (7000, "💎 Platinum"),
+    (15000, "💠 Diamond"),
+    (30000, "👑 Legend"),
+    (60000, "🔱 Mythic"),
+    (100000, "🌌 Immortal"),
 ]
 
 # ============ BIRTHDAY TRACKER (persisted) ============
@@ -66,42 +74,100 @@ birthdays = {}        # chat_id -> {user_id: {"date": "DD-MM", "name": str, "pho
 birthday_wished = {}  # chat_id -> {user_id: "YYYY-MM-DD"} - aaj already wish kiya ya nahi, dobara na ho
 BIRTHDAY_PATTERN = re.compile(r'/setbirthday\s+(\d{1,2})[-/](\d{1,2})', re.IGNORECASE)
 
-# ============ DAILY RIDDLE GAME (ephemeral) ============
-active_riddles = {}  # chat_id -> {"question": str, "answer": str}
-RIDDLES = [
-    ("Main aata hoon lekin kabhi jaata nahi, mujhe pakadna asaan nahi - main kya hoon?", "time"),
-    ("Jitna kaato utna badhta hai - main kya hoon?", "gaddha"),
-    ("Bina paron ke udta hoon, bina aankhon ke rota hoon - main kya hoon?", "badal"),
-    ("Do bhai ek doosre ko kabhi nahi dekh sakte - kaun hain wo?", "aankhen"),
-    ("Jitna zyada hoga utna kam dikhega - kya hai?", "andhera"),
-    ("Mujhe todoge tabhi use kar paoge - main kya hoon?", "anda"),
-    ("Sab log mujhse aage nikalna chahte hain lekin main hamesha aage hi rehta hoon - kaun hoon?", "future"),
-    ("Ek raja ke paas na taj hai na sar - kaun hai?", "taash ka raja"),
+# ============ RIDDLE GAME (sirf Owner start kar sakta hai, 4 option buttons, timer ke saath) ============
+active_riddles = {}         # chat_id -> {"id", "question", "options", "correct", "attempted", "expires", "message_id", "timer"}
+used_riddle_questions = {}  # chat_id -> pichle riddles ke (normalized) questions - repeat rokne ke liye
+riddle_lock = threading.Lock()
+RIDDLE_TIME_LIMIT = 60      # seconds - iske baad riddle khud expire ho jaata hai
+RIDDLE_WIN_XP = 25          # pehle sahi jawab dene wale ko bonus XP
+RIDDLE_THEMES = [
+    "janwar", "khana-peena", "ghar ki cheezein", "prakriti", "sharir ke ang", "technology",
+    "school aur padhai", "khel-kood", "paisa aur bazaar", "safar aur gaadiyan", "samay", "mausam",
+    "rishte-naate", "kapde aur fashion", "phal aur sabziyan", "music aur movies",
 ]
+
+# Backup riddles (AI se naya riddle na ban paye tabhi kaam aate hain). Format:
+# (question, [4 options], sahi option ka index)
+RIDDLE_POOL = [
+    ("Woh kaun si cheez hai jo jitna zyada sukhaati hai utni hi geeli hoti jaati hai?", ["Tauliya", "Kapda", "Sponge", "Rumaal"], 0),
+    ("Jitna khodoge utna bada hoga, bataao kya?", ["Gaddha", "Pahaad", "Ped", "Diya"], 0),
+    ("Bina paron ke udta hoon, bina aankhon ke rota hoon - main kaun?", ["Badal", "Patang", "Dhuan", "Chidiya"], 0),
+    ("Do bhai saath rehte hain par ek doosre ko kabhi nahi dekh paate - kaun hain?", ["Aankhen", "Haath", "Kaan", "Paon"], 0),
+    ("Woh kya hai jo tumhara hai par doosre log use tumse zyada istemal karte hain?", ["Naam", "Phone", "Gaadi", "Kapde"], 0),
+    ("Jiske paas shehar hain par ghar nahi, jungle hain par ped nahi, nadiyan hain par paani nahi - kya hai?", ["Naksha", "Ghadi", "Kitaab", "Kapda"], 0),
+    ("Mujhe todoge tabhi kaam aaunga, bina toote mera koi fayda nahi - main kaun?", ["Anda", "Patthar", "Loha", "Lakdi"], 0),
+    ("Kis cheez ke chaar pair hote hain par wo chal nahi sakti?", ["Kursi", "Billi", "Kutta", "Ghoda"], 0),
+    ("Woh kya hai jo kitna bhi khaaye kabhi pet nahi bharta?", ["Aag", "Paani", "Mitti", "Hawa"], 0),
+    ("Woh kya hai jo hamesha badhti rehti hai par kabhi ghat nahi sakti?", ["Umar", "Paisa", "Kad", "Baal"], 0),
+    ("Jitna zyada hoga utna kam dikhega - bataao kya?", ["Andhera", "Roshni", "Awaaz", "Khushboo"], 0),
+    ("Woh kaun hai jo bolta nahi par bahut kuch sikha deta hai?", ["Kitaab", "Patthar", "Ped", "Kursi"], 0),
+    ("Woh kya hai jo tootta hai jab uska naam liya jaata hai?", ["Khamoshi", "Sheesha", "Baraf", "Patthar"], 0),
+    ("Iski ek aankh hai par dekh nahi sakti - kaun?", ["Sui", "Ghadi", "Kaanch", "Patang"], 0),
+    ("Woh kya hai jo tum kisi ko diye bina rakh hi nahi sakte?", ["Vaada", "Phool", "Kitaab", "Khilona"], 0),
+    ("Iska muh hai par khaata nahi, bistar hai par sota nahi - kaun?", ["Nadi", "Pahaad", "Kuan", "Sadak"], 0),
+    ("Bina pair ke sabse tez daudta hai, koi ise rok nahi sakta - kya hai?", ["Samay", "Kutta", "Ghoda", "Cheetah"], 0),
+    ("Woh kya hai jise tumse zyada doosre log dekhte hain?", ["Chehra", "Phone", "Ghar", "Gaadi"], 0),
+    ("Dikhta hai par pakda nahi ja sakta, roshni mein saath aur andhere mein gayab - kya hai?", ["Parchhai", "Paani", "Dhuan", "Hawa"], 0),
+    ("Iske haath hain par taali nahi baja sakta, chalta hai par kahin nahi jaata - kaun?", ["Ghadi", "Robot", "Chidiya", "Nadi"], 0),
+]
+
+
+def get_level_index(xp):
+    """XP ke hisaab se LEVELS list ka index deta hai."""
+    idx = 0
+    for i, (threshold, _) in enumerate(LEVELS):
+        if xp >= threshold:
+            idx = i
+    return idx
 
 
 def get_level_name(xp):
     """Diye gaye XP ke hisaab se level ka naam deta hai."""
-    name = LEVELS[0][1]
-    for threshold, lvl_name in LEVELS:
-        if xp >= threshold:
-            name = lvl_name
-        else:
-            break
-    return name
+    return LEVELS[get_level_index(xp)][1]
 
 
 def get_next_level_info(xp):
-    for threshold, lvl_name in LEVELS:
-        if xp < threshold:
-            return lvl_name, threshold
+    idx = get_level_index(xp)
+    if idx + 1 < len(LEVELS):
+        return LEVELS[idx + 1][1], LEVELS[idx + 1][0]
     return None, None
+
+
+def get_level_progress_pct(xp):
+    """Current level se agle level ki taraf kitna % ho gaya (progress bar ke liye)."""
+    idx = get_level_index(xp)
+    if idx + 1 >= len(LEVELS):
+        return 100
+    cur_thr = LEVELS[idx][0]
+    next_thr = LEVELS[idx + 1][0]
+    return int((xp - cur_thr) * 100 / (next_thr - cur_thr))
+
+
+def progress_bar(pct, blocks=10):
+    filled = int(round(pct / 100.0 * blocks))
+    filled = max(0, min(blocks, filled))
+    return "▰" * filled + "▱" * (blocks - filled)
+
+
+def fmt_xp(n):
+    return format(n, ",")
+
+
+def announce_level_up(chat_id, user_id, name, level_name):
+    mention = mention_html(user_id, name)
+    text = ("🎊━━━━━━━━━━━━━━🎊\n"
+            "   <b>LEVEL UP!</b>\n"
+            "🎊━━━━━━━━━━━━━━🎊\n\n"
+            + mention + " ab <b>" + level_name + "</b> ban gaya! 🔥\n"
+            "Aise hi active raho 💪")
+    safe_run(send_message, chat_id, text, None, "HTML")
 
 
 def award_xp(chat_id, user_id, name):
     """Har 'clean' message pe thoda XP milta hai - max ek baar har 20 second mein per
     user, taaki spam karke XP farm na kiya ja sake. Level-up hone par naya level naam
-    return karta hai (announce karne ke liye), warna None."""
+    return karta hai (announce karne ke liye), warna None. XP disk pe throttled tarike se
+    save hota hai (har 30 second mein max ek baar), level-up par turant."""
     key = (chat_id, user_id)
     now = time.time()
     if now - xp_last_time.get(key, 0) < 20:
@@ -121,6 +187,28 @@ def award_xp(chat_id, user_id, name):
     w_entry["name"] = name
     w_entry["xp"] += gained
 
+    if new_level != old_level:
+        save_state()
+        return new_level
+    throttled_save_state()
+    return None
+
+
+def award_bonus_xp(chat_id, user_id, name, amount):
+    """Kisi game/event ka bonus XP dena (cooldown ke bina). Level-up hua to naya level naam."""
+    chat_xp = user_xp.setdefault(chat_id, {})
+    entry = chat_xp.setdefault(user_id, {"xp": 0, "name": name})
+    entry["name"] = name
+    old_level = get_level_name(entry["xp"])
+    entry["xp"] += amount
+    new_level = get_level_name(entry["xp"])
+
+    chat_weekly = weekly_xp.setdefault(chat_id, {})
+    w_entry = chat_weekly.setdefault(user_id, {"xp": 0, "name": name})
+    w_entry["name"] = name
+    w_entry["xp"] += amount
+
+    save_state()
     return new_level if new_level != old_level else None
 
 
@@ -134,42 +222,94 @@ def check_week_rollover(chat_id):
         return
     if last_week != week_key:
         chat_weekly = weekly_xp.get(chat_id, {})
-        if chat_weekly:
-            top = sorted(chat_weekly.items(), key=lambda kv: kv[1]["xp"], reverse=True)[:3]
-            if top:
-                medals = ["🥇", "🥈", "🥉"]
-                lines = ["🏆 Pichle hafte ke TOP active members:"]
-                for i, (uid, info) in enumerate(top):
-                    lines.append(medals[i] + " " + info["name"] + " - " + str(info["xp"]) + " XP")
-                safe_run(send_message, chat_id, "\n".join(lines))
+        top = sorted(chat_weekly.items(), key=lambda kv: kv[1]["xp"], reverse=True)[:3]
+        if top:
+            medals = ["🥇", "🥈", "🥉"]
+            lines = ["🏆━━━━━━━━━━━━━━🏆",
+                     "  <b>HAFTE KE TOP STARS</b>",
+                     "🏆━━━━━━━━━━━━━━🏆", ""]
+            for i, (uid, info) in enumerate(top):
+                lines.append(medals[i] + " <b>" + escape_html(info["name"]) + "</b> — " + fmt_xp(info["xp"]) + " XP")
+            lines.append("")
+            lines.append("🔥 Naya hafta shuru! Chat karo aur top pe aao 💪")
+            safe_run(send_message, chat_id, "\n".join(lines), None, "HTML")
         weekly_xp[chat_id] = {}
         current_week[chat_id] = week_key
+        save_state()
+
+
+def cooldown_block(chat_id, user_id, name, cmd):
+    """/rank aur /leaderboard members ke liye 1 ghante mein sirf ek baar. Owner aur admins
+    pe koi limit nahi. Agar user abhi cooldown mein hai to message bhej deta hai aur True
+    return karta hai (matlab command aage mat chalao)."""
+    if is_owner(user_id) or safe_check_admin(chat_id, user_id):
+        return False
+    key = (chat_id, user_id, cmd)
+    remaining = CMD_COOLDOWN_SECONDS - (time.time() - cmd_last_used.get(key, 0))
+    if remaining > 0:
+        mins = int(remaining // 60) + 1
+        mention = mention_html(user_id, name)
+        safe_run(send_message, chat_id,
+                 "⏳ " + mention + ", ye command 1 ghante mein sirf ek baar chalta hai.\n"
+                 "⌛ Ab <b>" + str(mins) + " min</b> baad try karna!", None, "HTML")
+        return True
+    cmd_last_used[key] = time.time()
+    return False
 
 
 def handle_rank(chat_id, user_id, name):
     chat_xp = user_xp.get(chat_id, {})
     entry = chat_xp.get(user_id)
     if not entry:
-        send_message(chat_id, name + ", abhi tak koi XP nahi kamaya - thoda chat karo pehle!")
+        send_message(chat_id, name + ", abhi tak koi XP nahi kamaya - thoda chat karo pehle! 💬")
         return
-    level = get_level_name(entry["xp"])
-    next_level, next_threshold = get_next_level_info(entry["xp"])
-    msg = name + " ka rank: " + level + " (" + str(entry["xp"]) + " XP)"
+    xp = entry["xp"]
+    level = get_level_name(xp)
+    pct = get_level_progress_pct(xp)
+    ranking = sorted(chat_xp.items(), key=lambda kv: kv[1]["xp"], reverse=True)
+    position = 1
+    for i, (uid, _) in enumerate(ranking):
+        if uid == user_id:
+            position = i + 1
+            break
+
+    lines = ["🎖️━━━━━━━━━━━━━━🎖️",
+             "     <b>RANK CARD</b>",
+             "🎖️━━━━━━━━━━━━━━🎖️", "",
+             "👤 <b>" + escape_html(name) + "</b>",
+             "🏅 Level: <b>" + level + "</b>",
+             "✨ XP: <b>" + fmt_xp(xp) + "</b>",
+             "📊 " + progress_bar(pct) + " " + str(pct) + "%"]
+    next_level, next_threshold = get_next_level_info(xp)
     if next_level:
-        msg += "\nAgle level (" + next_level + ") tak: " + str(next_threshold - entry["xp"]) + " XP baaki"
-    send_message(chat_id, msg)
+        lines.append("🎯 Agla: " + next_level + " — " + fmt_xp(next_threshold - xp) + " XP baaki")
+    else:
+        lines.append("🌟 Tum sabse upar ke level pe ho!")
+    lines.append("🏆 Group rank: <b>#" + str(position) + "</b> / " + str(len(ranking)))
+    send_message(chat_id, "\n".join(lines), None, "HTML")
 
 
 def handle_leaderboard(chat_id):
     chat_xp = user_xp.get(chat_id, {})
     if not chat_xp:
-        send_message(chat_id, "Abhi tak koi activity nahi hai is group mein.")
+        send_message(chat_id, "Abhi tak koi activity nahi hai is group mein. 💬")
         return
     top = sorted(chat_xp.items(), key=lambda kv: kv[1]["xp"], reverse=True)[:10]
-    lines = ["🏆 All-Time Leaderboard:"]
+    icons = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines = ["🏆━━━━━━━━━━━━━━🏆",
+             "     <b>LEADERBOARD</b>",
+             "🏆━━━━━━━━━━━━━━🏆", ""]
     for i, (uid, info) in enumerate(top):
-        lines.append(str(i + 1) + ". " + info["name"] + " - " + str(info["xp"]) + " XP (" + get_level_name(info["xp"]) + ")")
-    send_message(chat_id, "\n".join(lines))
+        lines.append(icons[i] + " <b>" + escape_html(info["name"]) + "</b>")
+        lines.append("      " + get_level_name(info["xp"]) + "  •  ✨ " + fmt_xp(info["xp"]) + " XP")
+    lines.append("")
+    chat_weekly = weekly_xp.get(chat_id, {})
+    if chat_weekly:
+        star_uid, star = max(chat_weekly.items(), key=lambda kv: kv[1]["xp"])
+        lines.append("⚡ Is hafte ka star: <b>" + escape_html(star["name"]) + "</b> (" + fmt_xp(star["xp"]) + " XP)")
+    lines.append("👥 Total ranked members: " + str(len(chat_xp)))
+    lines.append("📈 /rank se apna level dekho")
+    send_message(chat_id, "\n".join(lines), None, "HTML")
 
 
 def handle_setbirthday(chat_id, user_id, name, message):
@@ -226,28 +366,238 @@ def check_birthdays(chat_id):
         save_state()
 
 
-def handle_riddle_command(chat_id):
-    question, answer = random.choice(RIDDLES)
-    active_riddles[chat_id] = {"question": question, "answer": answer.lower()}
-    send_message(chat_id, "🧩 Riddle time!\n\n" + question + "\n\nJawab seedha group mein type kar do!")
+def _norm_q(q):
+    return re.sub(r'[^a-z0-9]', '', q.lower())
 
 
-def check_riddle_answer(chat_id, user_id, name, text):
-    """Agar is chat mein koi active riddle hai aur is message mein sahi jawab hai, to
-    congratulate karke bonus XP deta hai. Return True agar sahi jawab tha (isse aage
-    normal AI-reply flow skip ho jaata hai)."""
-    riddle = active_riddles.get(chat_id)
-    if not riddle:
-        return False
-    if riddle["answer"] in text.lower().strip():
-        del active_riddles[chat_id]
-        chat_xp = user_xp.setdefault(chat_id, {})
-        entry = chat_xp.setdefault(user_id, {"xp": 0, "name": name})
-        entry["name"] = name
-        entry["xp"] += 10
-        send_message(chat_id, "🎉 " + name + " ne sahi jawab diya! (+10 bonus XP) ✅ Sahi jawab: " + riddle["answer"])
-        return True
+def is_repeat_riddle(chat_id, question):
+    """Pehle aa chuke riddle se same ya bahut milta-julta ho to True (repeat rokne ke liye)."""
+    n = _norm_q(question)
+    for old in used_riddle_questions.get(chat_id, [])[-80:]:
+        if n == old or difflib.SequenceMatcher(None, n, old).ratio() > 0.85:
+            return True
     return False
+
+
+def mark_riddle_used(chat_id, question):
+    used = used_riddle_questions.setdefault(chat_id, [])
+    used.append(_norm_q(question))
+    if len(used) > 150:
+        del used[:len(used) - 150]  # storage chhota rakhne ke liye sirf pichle 150 yaad rakhte hain
+    save_state()
+
+
+def parse_riddle_json(raw):
+    """AI ke jawab se riddle JSON nikaal ke validate karta hai. Galat/adhoora ho to None."""
+    m = re.search(r'\{.*\}', raw or "", re.DOTALL)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:
+        return None
+    q = str(obj.get("question", "")).strip()
+    opts = obj.get("options")
+    corr = obj.get("correct")
+    if not q or len(q) > 300 or not isinstance(opts, list) or len(opts) != 4:
+        return None
+    opts = [str(o).strip() for o in opts]
+    if any((not o) or len(o) > 40 for o in opts):
+        return None
+    if len(set(o.lower() for o in opts)) != 4:
+        return None
+    if not isinstance(corr, int) or isinstance(corr, bool) or not (0 <= corr <= 3):
+        return None
+    return q, opts, corr
+
+
+def generate_ai_riddle(chat_id):
+    """AI se bilkul naya riddle (4 options ke saath) banwata hai - har baar alag theme aur
+    pichle riddles ki list dekar taaki repeat na ho. Fail ho to None."""
+    recent = used_riddle_questions.get(chat_id, [])[-10:]
+    for _ in range(3):
+        theme = random.choice(RIDDLE_THEMES)
+        prompt = ("Ek bilkul NAYA, mazedaar riddle (paheli) Hinglish mein banao. Theme: " + theme + ".\n"
+                  "Sirf valid JSON do, is exact format mein, aur kuch nahi:\n"
+                  '{"question": "...", "options": ["...", "...", "...", "..."], "correct": 0}\n'
+                  "Rules: 4 alag-alag options (har ek max 3 shabd), sirf ek sahi, 'correct' 0 se 3 ke beech "
+                  "sahi option ka index ho, question max 2 line ka aur family-friendly ho. Random number seed: "
+                  + str(random.randint(1000, 9999)) + ". Ye purane riddles se bilkul alag hona chahiye, "
+                  "inhe repeat mat karna: " + " | ".join(recent))
+        messages = [
+            {"role": "system", "content": "Tum ek riddle-maker ho. Sirf valid JSON return karo, koi explanation ya markdown nahi."},
+            {"role": "user", "content": prompt},
+        ]
+        raw = ask_ai_raw(messages, max_tokens=700)
+        parsed = parse_riddle_json(raw)
+        if parsed and not is_repeat_riddle(chat_id, parsed[0]):
+            return parsed
+    return None
+
+
+def pick_static_riddle(chat_id):
+    """Backup pool se aisa riddle jo is chat mein pehle nahi aaya. Sab khatam ho gaye to None."""
+    used = used_riddle_questions.get(chat_id, [])
+    unused = [r for r in RIDDLE_POOL if _norm_q(r[0]) not in used]
+    if not unused:
+        return None
+    return random.choice(unused)
+
+
+def send_html_keyboard(chat_id, text, keyboard):
+    """HTML message + inline buttons bhejta hai, message_id return karta hai."""
+    try:
+        r = requests.post(TELEGRAM_URL + "/sendMessage", json={
+            "chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": keyboard
+        }, timeout=15)
+        return r.json().get("result", {}).get("message_id")
+    except Exception as e:
+        print("SEND HTML KEYBOARD ERROR: " + str(e))
+        return None
+
+
+def edit_message_html(chat_id, message_id, text):
+    """Message ka text badalta hai aur buttons hata deta hai."""
+    try:
+        requests.post(TELEGRAM_URL + "/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id, "text": text,
+            "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []}
+        }, timeout=15)
+    except Exception as e:
+        print("EDIT HTML ERROR: " + str(e))
+
+
+def riddle_header(title):
+    return "🧩━━━━━━━━━━━━━━🧩\n   <b>" + title + "</b>\n🧩━━━━━━━━━━━━━━🧩\n\n"
+
+
+def handle_riddle_command(chat_id, user_id):
+    """/riddle - SIRF Owner chala sakta hai. Har baar naya riddle, 4 option buttons,
+    60 second ka timer."""
+    if not is_owner(user_id):
+        send_message(chat_id, "🚫 Riddle sirf Owner start kar sakte hain.")
+        return
+    with riddle_lock:
+        cur = active_riddles.get(chat_id)
+        if cur and time.time() < cur["expires"]:
+            busy = True
+        else:
+            busy = False
+    if busy:
+        send_message(chat_id, "⏳ Pehla riddle abhi chal raha hai, use khatam hone do!")
+        return
+
+    send_typing_action(chat_id)
+    riddle = generate_ai_riddle(chat_id) or pick_static_riddle(chat_id)
+    if not riddle:
+        send_message(chat_id, "😅 Abhi naya riddle nahi ban paya (AI busy hai). Thodi der baad phir /riddle likho.")
+        return
+    question, options, correct = riddle
+
+    # options ka order har baar shuffle - sahi jawab hamesha alag jagah aaye
+    order = list(range(4))
+    random.shuffle(order)
+    options = [options[i] for i in order]
+    correct = order.index(correct)
+
+    rid = str(random.randint(100000, 999999))
+    letters = ["A", "B", "C", "D"]
+    buttons = [{"text": letters[i] + ") " + options[i], "callback_data": "rdl:" + rid + ":" + str(i)} for i in range(4)]
+    keyboard = {"inline_keyboard": [buttons[0:2], buttons[2:4]]}
+    text = (riddle_header("RIDDLE TIME") +
+            "❓ <b>" + escape_html(question) + "</b>\n\n"
+            "⏳ Time: <b>" + str(RIDDLE_TIME_LIMIT) + " second</b>\n"
+            "🎁 Inaam: <b>+" + str(RIDDLE_WIN_XP) + " XP</b> (pehle sahi jawab wale ko)\n"
+            "⚠️ Sabko sirf ek hi try milega\n\n"
+            "👇 Sahi option choose karo")
+    message_id = send_html_keyboard(chat_id, text, keyboard)
+    if not message_id:
+        send_message(chat_id, "Riddle bhejne mein dikkat aayi, dobara try karo.")
+        return
+
+    mark_riddle_used(chat_id, question)
+    timer = threading.Timer(RIDDLE_TIME_LIMIT, expire_riddle, args=(chat_id, rid))
+    timer.daemon = True
+    with riddle_lock:
+        active_riddles[chat_id] = {
+            "id": rid, "question": question, "options": options, "correct": correct,
+            "attempted": set(), "expires": time.time() + RIDDLE_TIME_LIMIT,
+            "message_id": message_id, "timer": timer,
+        }
+    timer.start()
+
+
+def expire_riddle(chat_id, rid):
+    """Time khatam - riddle band karke sahi jawab bata deta hai."""
+    with riddle_lock:
+        riddle = active_riddles.get(chat_id)
+        if not riddle or riddle["id"] != rid:
+            return
+        del active_riddles[chat_id]
+    text = (riddle_header("TIME UP!") +
+            "❓ " + escape_html(riddle["question"]) + "\n\n"
+            "✅ Sahi jawab tha: <b>" + escape_html(riddle["options"][riddle["correct"]]) + "</b>\n"
+            "😅 Is baar kisi ne sahi jawab nahi diya!")
+    edit_message_html(chat_id, riddle["message_id"], text)
+
+
+def handle_riddle_press(callback):
+    """Riddle ke option button dabane par chalta hai. Har banda ek hi baar try kar sakta hai,
+    pehle sahi jawab wala jeetta hai."""
+    parts = callback.get('data', '').split(":")
+    if len(parts) != 3:
+        return
+    rid = parts[1]
+    try:
+        idx = int(parts[2])
+    except ValueError:
+        return
+    chat_id = callback['message']['chat']['id']
+    user = callback['from']
+    uid = user.get('id')
+    name = get_name(user)
+
+    outcome = None
+    riddle = None
+    with riddle_lock:
+        riddle = active_riddles.get(chat_id)
+        if not riddle or riddle["id"] != rid:
+            outcome = "gone"
+        elif time.time() > riddle["expires"]:
+            outcome = "expired"
+        elif uid in riddle["attempted"]:
+            outcome = "again"
+        else:
+            riddle["attempted"].add(uid)
+            if idx == riddle["correct"]:
+                del active_riddles[chat_id]
+                outcome = "win"
+            else:
+                outcome = "wrong"
+
+    if outcome == "gone":
+        safe_run(answer_callback, callback['id'], "⌛ Ye riddle khatam ho chuka hai")
+    elif outcome == "expired":
+        safe_run(answer_callback, callback['id'], "⏰ Time khatam ho gaya!")
+    elif outcome == "again":
+        safe_run(answer_callback, callback['id'], "😅 Tum ek baar try kar chuke ho")
+    elif outcome == "wrong":
+        safe_run(answer_callback, callback['id'], "❌ Galat jawab! Tumhara ek hi chance tha")
+    elif outcome == "win":
+        try:
+            riddle["timer"].cancel()
+        except Exception:
+            pass
+        new_level = award_bonus_xp(chat_id, uid, name, RIDDLE_WIN_XP)
+        safe_run(answer_callback, callback['id'], "🎉 Sahi jawab! +" + str(RIDDLE_WIN_XP) + " XP")
+        text = (riddle_header("RIDDLE SOLVED!") +
+                "❓ " + escape_html(riddle["question"]) + "\n\n"
+                "✅ Sahi jawab: <b>" + escape_html(riddle["options"][riddle["correct"]]) + "</b>\n"
+                "🏆 Winner: " + mention_html(uid, name) + " (+" + str(RIDDLE_WIN_XP) + " XP) 🎉")
+        edit_message_html(chat_id, riddle["message_id"], text)
+        if new_level:
+            announce_level_up(chat_id, uid, name, new_level)
+
 
 HISTORY_HOURS = 24
 MAX_MESSAGES_PER_USER = 40
@@ -757,12 +1107,9 @@ def handle_message(message):
     sender_name = get_name(message.get('from', {}))
     safe_run(check_week_rollover, chat_id)
     safe_run(check_birthdays, chat_id)
-    if check_riddle_answer(chat_id, user_id, sender_name, text):
-        return
     leveled_up = award_xp(chat_id, user_id, sender_name)
     if leveled_up:
-        mention = mention_html(user_id, sender_name)
-        safe_run(send_message, chat_id, "🎊 " + mention + " level up ho gaya! Ab tum ho: " + leveled_up, None, "HTML")
+        announce_level_up(chat_id, user_id, sender_name, leveled_up)
 
     # ---- DM spam disclaimer ----
     if DM_PATTERN.search(text):
@@ -798,16 +1145,18 @@ def handle_message(message):
         safe_run(send_message, chat_id, RULES_TEXT(), None, "HTML")
         return
     if cmd == '/rank' or cmd == '/level':
-        safe_run(handle_rank, chat_id, user_id, sender_name)
+        if not cooldown_block(chat_id, user_id, sender_name, '/rank'):
+            safe_run(handle_rank, chat_id, user_id, sender_name)
         return
     if cmd == '/leaderboard' or cmd == '/top':
-        safe_run(handle_leaderboard, chat_id)
+        if not cooldown_block(chat_id, user_id, sender_name, '/leaderboard'):
+            safe_run(handle_leaderboard, chat_id)
         return
     if cmd == '/setbirthday':
         safe_run(handle_setbirthday, chat_id, user_id, sender_name, message)
         return
     if cmd == '/riddle':
-        safe_run(handle_riddle_command, chat_id)
+        safe_run(handle_riddle_command, chat_id, user_id)
         return
     if cmd in COMMAND_PERMISSION:
         if not has_permission(chat_id, user_id, COMMAND_PERMISSION[cmd]):
@@ -957,11 +1306,12 @@ def HELP_TEXT():
             "Admin/Owner only (reply karke):\n/ban /kick /unban /mute /unmute /warn /unwarn /pin\n"
             "/unbanall - saare banned members ek saath unban\n\n"
             "Group (sabke liye):\n/rule - group ke rules dekho\n/report - shikayat bhejo\n"
-            "/rank - apna XP aur level dekho\n/leaderboard - top active members\n"
+            "/rank - apna XP aur level dekho (1 ghante mein ek baar)\n"
+            "/leaderboard - top active members (1 ghante mein ek baar)\n"
             "/setbirthday DD-MM - birthday save karo (photo bhi attach kar sakte ho)\n"
-            "/riddle - ek naya riddle khelo, GIF bhi bol ke mangwa sakte ho ('gif bhejo')\n\n"
-            "Admin/Owner only settings:\n/setwelcome /linkson /linksoff\n\n"
-            "Owner DM:\n/panel - group control\n/history - banned/muted members dekho\n\n"
+            "'gif bhejo' bol ke GIF mangwa sakte ho\n\n"
+            "Owner only:\n/riddle - 4 option wala riddle (60 second ka timer)\n"
+            "/setwelcome /linkson /linksoff, DM mein /panel aur /history\n\n"
             "/help - ye list")
 
 
@@ -1254,6 +1604,10 @@ def handle_callback(callback):
     owner_dm_chat_id = callback['message']['chat']['id']
     owner_id = callback['from']['id']
 
+    if data_str.startswith("rdl:"):
+        safe_run(handle_riddle_press, callback)
+        return
+
     if data_str.startswith("modbtn:"):
         parts = data_str.split(":")
         subaction = parts[1]
@@ -1404,39 +1758,59 @@ def handle_modbtn(subaction, chat_id, target_id):
     return "Kuch nahi hua."
 
 
-STATE_FILE = "/tmp/khan_bot_state.json"
+STATE_FILE = os.environ.get("STATE_FILE", "/tmp/khan_bot_state.json")
+_state_lock = threading.Lock()
+_last_state_save = 0.0
 
 
 def save_state():
-    """warnings, moderation_records aur birthdays ko disk pe save karta hai - taaki bot
-    restart (Render/Railway free tier ka spin-down/wake, ya koi crash) hone par bhi
-    purani warning counts, ban/mute history aur birthdays yaad rahe. (XP/leaderboard
-    jaan-bujhkar persist nahi karte - bahut baar likhna padta, isliye wo restart pe
-    reset ho jaata hai, jo ek casual gamification feature ke liye theek hai.)"""
+    """warnings, ban/mute history, birthdays, XP aur riddle-history ko disk pe save karta hai,
+    taaki bot restart hone par bhi sab yaad rahe. Sirf chhote numbers/naam save hote hain
+    (level alag se store nahi hota, XP se calculate hota hai), isliye file hamesha chhoti rehti
+    hai. Likhna atomic hai (pehle temp file, phir replace) taaki beech mein crash ho to bhi
+    file kharab na ho, aur lock se do threads ek saath nahi likhte."""
     try:
         data = {
-            "warnings": {str(cid): {str(uid): c for uid, c in warns.items()} for cid, warns in warnings.items()},
+            "warnings": {str(cid): {str(uid): c for uid, c in dict(warns).items()} for cid, warns in dict(warnings).items()},
             "moderation_records": {
                 str(cid): {
-                    "banned": {str(uid): name for uid, name in rec.get("banned", {}).items()},
-                    "muted": {str(uid): name for uid, name in rec.get("muted", {}).items()},
+                    "banned": {str(uid): name for uid, name in dict(rec.get("banned", {})).items()},
+                    "muted": {str(uid): name for uid, name in dict(rec.get("muted", {})).items()},
                 }
-                for cid, rec in moderation_records.items()
+                for cid, rec in dict(moderation_records).items()
             },
-            "birthdays": {
-                str(cid): {str(uid): info for uid, info in bdays.items()}
-                for cid, bdays in birthdays.items()
-            },
+            "birthdays": {str(cid): {str(uid): dict(info) for uid, info in dict(bd).items()} for cid, bd in dict(birthdays).items()},
+            "birthday_wished": {str(cid): {str(uid): d for uid, d in dict(w).items()} for cid, w in dict(birthday_wished).items()},
+            "user_xp": {str(cid): {str(uid): dict(info) for uid, info in dict(users).items()} for cid, users in dict(user_xp).items()},
+            "weekly_xp": {str(cid): {str(uid): dict(info) for uid, info in dict(users).items()} for cid, users in dict(weekly_xp).items()},
+            "current_week": {str(cid): wk for cid, wk in dict(current_week).items()},
+            "used_riddles": {str(cid): list(qs)[-150:] for cid, qs in dict(used_riddle_questions).items()},
         }
-        with open(STATE_FILE, "w") as f:
-            json.dump(data, f)
+        with _state_lock:
+            folder = os.path.dirname(STATE_FILE)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            tmp_path = STATE_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, STATE_FILE)
     except Exception as e:
         print("STATE SAVE ERROR: " + str(e))
 
 
+def throttled_save_state(min_interval=30):
+    """Baar-baar hone wale updates (jaise har message ka XP) ke liye - disk pe max har
+    min_interval second mein ek baar likhta hai."""
+    global _last_state_save
+    now = time.time()
+    if now - _last_state_save < min_interval:
+        return
+    _last_state_save = now
+    save_state()
+
+
 def load_state():
     """Bot start hote hi purana saved state wapas load karta hai."""
-    global warnings, moderation_records, birthdays
     try:
         with open(STATE_FILE, "r") as f:
             data = json.load(f)
@@ -1447,15 +1821,24 @@ def load_state():
                 "banned": {int(uid): name for uid, name in rec.get("banned", {}).items()},
                 "muted": {int(uid): name for uid, name in rec.get("muted", {}).items()},
             }
-        for cid_str, bdays in data.get("birthdays", {}).items():
-            birthdays[int(cid_str)] = {int(uid): info for uid, info in bdays.items()}
-        print("STATE LOADED: " + str(len(warnings)) + " chats ki warnings, " + str(len(moderation_records)) + " chats ka mod-record, " + str(len(birthdays)) + " chats ki birthdays")
+        for cid_str, bd in data.get("birthdays", {}).items():
+            birthdays[int(cid_str)] = {int(uid): info for uid, info in bd.items()}
+        for cid_str, w in data.get("birthday_wished", {}).items():
+            birthday_wished[int(cid_str)] = {int(uid): d for uid, d in w.items()}
+        for cid_str, users in data.get("user_xp", {}).items():
+            user_xp[int(cid_str)] = {int(uid): info for uid, info in users.items()}
+        for cid_str, users in data.get("weekly_xp", {}).items():
+            weekly_xp[int(cid_str)] = {int(uid): info for uid, info in users.items()}
+        for cid_str, wk in data.get("current_week", {}).items():
+            current_week[int(cid_str)] = wk
+        for cid_str, qs in data.get("used_riddles", {}).items():
+            used_riddle_questions[int(cid_str)] = list(qs)
+        print("STATE LOADED: " + str(len(warnings)) + " chats warnings, " + str(len(moderation_records)) + " mod-record, "
+              + str(len(birthdays)) + " birthdays, " + str(len(user_xp)) + " chats ka XP")
     except FileNotFoundError:
         print("STATE FILE nahi mila - fresh start")
     except Exception as e:
         print("STATE LOAD ERROR: " + str(e))
-
-
 def record_moderation(chat_id, kind, user_id, name):
     """kind: 'ban' ya 'mute' - /history mein dikhane ke liye yaad rakhta hai."""
     chat_records = moderation_records.setdefault(chat_id, {"banned": {}, "muted": {}})
@@ -2256,7 +2639,7 @@ def is_usable_reply(text, finish_reason=None, user_text=None):
     return True
 
 
-def _try_groq_chat(messages_for_ai):
+def _try_groq_chat(messages_for_ai, max_tokens=200):
     # reasoning_format="hidden" ZAROORI hai - warna gpt-oss-120b (reasoning model) apna
     # poora internal 'thinking process' bhi answer ke andar bhej deta hai (jo user ko
     # dikhta hai) - Groq ke docs confirm karte hain ki default 'raw' hai, isse content
@@ -2264,7 +2647,7 @@ def _try_groq_chat(messages_for_ai):
     # jawab milta hai.
     payload = {
         "model": "openai/gpt-oss-120b", "messages": messages_for_ai,
-        "temperature": 0.8, "max_tokens": 200,
+        "temperature": 0.8, "max_tokens": max_tokens,
         "reasoning_format": "hidden", "reasoning_effort": "low"
     }
     res, data = call_groq(payload, timeout=20)
@@ -2276,9 +2659,9 @@ def _try_groq_chat(messages_for_ai):
     return None, None
 
 
-def _try_gemini_chat(messages_for_ai):
+def _try_gemini_chat(messages_for_ai, max_tokens=200):
     system_text, gemini_contents = to_gemini_contents(messages_for_ai)
-    payload = {"contents": gemini_contents, "generationConfig": {"temperature": 0.8, "maxOutputTokens": 200}}
+    payload = {"contents": gemini_contents, "generationConfig": {"temperature": 0.8, "maxOutputTokens": max_tokens}}
     if system_text:
         payload["systemInstruction"] = {"parts": [{"text": system_text}]}
     _, data = call_gemini(payload, timeout=20)
@@ -2289,8 +2672,8 @@ def _try_gemini_chat(messages_for_ai):
     return None, None
 
 
-def _try_openai_compatible_chat(name, call_fn, messages_for_ai, extra=None):
-    payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": 200}
+def _try_openai_compatible_chat(name, call_fn, messages_for_ai, extra=None, max_tokens=200):
+    payload = {"messages": messages_for_ai, "temperature": 0.8, "max_tokens": max_tokens}
     if extra:
         payload.update(extra)
     _, data = call_fn(payload, timeout=20)
@@ -2299,6 +2682,29 @@ def _try_openai_compatible_chat(name, call_fn, messages_for_ai, extra=None):
         return choice["message"]["content"], choice.get("finish_reason")
     print(name.upper() + " CHAT FAILED: " + str(data))
     return None, None
+
+
+def ask_ai_raw(messages, max_tokens=600):
+    """Chat-reply ke alawa kisi bhi kaam (jaise riddle banwana) ke liye 7 providers ki chain se
+    seedha raw text jawab laata hai. Chat wale quality-filters yahan nahi lagte."""
+    chain = [
+        ("groq", lambda: _try_groq_chat(messages, max_tokens)),
+        ("gemini", lambda: _try_gemini_chat(messages, max_tokens)),
+        ("openrouter", lambda: _try_openai_compatible_chat("openrouter", call_openrouter, messages, {"reasoning": {"exclude": True}}, max_tokens)),
+        ("mistral", lambda: _try_openai_compatible_chat("mistral", call_mistral, messages, None, max_tokens)),
+        ("cerebras", lambda: _try_openai_compatible_chat("cerebras", call_cerebras, messages, {"reasoning_format": "hidden"}, max_tokens)),
+        ("deepseek", lambda: _try_openai_compatible_chat("deepseek", call_deepseek, messages, None, max_tokens)),
+        ("nvidia", lambda: _try_openai_compatible_chat("nvidia", call_nvidia, messages, None, max_tokens)),
+    ]
+    for name, attempt in chain:
+        try:
+            out, finish_reason = attempt()
+        except Exception as e:
+            print(name.upper() + " RAW EXCEPTION: " + str(e))
+            continue
+        if out and finish_reason != "length":
+            return out
+    return None
 
 
 def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
