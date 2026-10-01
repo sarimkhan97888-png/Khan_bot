@@ -38,6 +38,7 @@ TELEGRAM_URL = "https://api.telegram.org/bot" + str(TELEGRAM_TOKEN)
 
 chat_memory = {}
 warnings = {}
+warn_reasons = {}  # chat_id -> {user_id: [reason strings]} - Owner ko DM mein poori detail dikhane ke liye
 pending_reports = {}
 waiting_for_reason = {}
 known_chats = {}
@@ -75,15 +76,19 @@ birthday_wished = {}  # chat_id -> {user_id: "YYYY-MM-DD"} - aaj already wish ki
 BIRTHDAY_PATTERN = re.compile(r'/setbirthday\s+(\d{1,2})[-/](\d{1,2})', re.IGNORECASE)
 
 # ============ RIDDLE GAME (sirf Owner start kar sakta hai, 4 option buttons, timer ke saath) ============
-active_riddles = {}         # chat_id -> {"id", "question", "options", "correct", "attempted", "expires", "message_id", "timer"}
+active_riddles = {}         # chat_id -> {"id", "question", "options", "correct", "attempted", "winners", "expires", "message_id", "timer"}
 used_riddle_questions = {}  # chat_id -> pichle riddles ke (normalized) questions - repeat rokne ke liye
 riddle_lock = threading.Lock()
 RIDDLE_TIME_LIMIT = 60      # seconds - iske baad riddle khud expire ho jaata hai
-RIDDLE_WIN_XP = 25          # pehle sahi jawab dene wale ko bonus XP
+RIDDLE_MAX_WINNERS = 3      # pehle 3 sahi jawab dene wale reward paate hain (1st/2nd/3rd)
+RIDDLE_WIN_XP = [25, 15, 10]  # 1st, 2nd, 3rd position ka XP
+RIDDLE_MEDALS = ["🥇", "🥈", "🥉"]
 RIDDLE_THEMES = [
     "janwar", "khana-peena", "ghar ki cheezein", "prakriti", "sharir ke ang", "technology",
     "school aur padhai", "khel-kood", "paisa aur bazaar", "safar aur gaadiyan", "samay", "mausam",
     "rishte-naate", "kapde aur fashion", "phal aur sabziyan", "music aur movies",
+    "Bharat ka itihaas", "duniya ka itihaas", "azaadi ki ladai", "purane raja-maharaja",
+    "vigyan ke aavishkaar", "bhoogol aur desh", "classic paheliyan",
 ]
 
 # Backup riddles (AI se naya riddle na ban paye tabhi kaam aate hain). Format:
@@ -412,20 +417,25 @@ def parse_riddle_json(raw):
 
 
 def generate_ai_riddle(chat_id):
-    """AI se bilkul naya riddle (4 options ke saath) banwata hai - har baar alag theme aur
-    pichle riddles ki list dekar taaki repeat na ho. Fail ho to None."""
+    """AI se bilkul naya sawaal (4 options ke saath) banwata hai - kabhi classic paheli,
+    kabhi history/trivia wala sawaal, har baar alag theme aur pichle sawaalon ki list
+    dekar taaki repeat na ho. Fail ho to None."""
     recent = used_riddle_questions.get(chat_id, [])[-10:]
     for _ in range(3):
         theme = random.choice(RIDDLE_THEMES)
-        prompt = ("Ek bilkul NAYA, mazedaar riddle (paheli) Hinglish mein banao. Theme: " + theme + ".\n"
+        style = random.choice([
+            "ek classic paheli (riddle) jiska jawab ek cheez/jaanwar/concept ho",
+            "ek history/general-knowledge trivia sawaal (jaise 'kis saal...', 'kaun tha...', 'kaha hua tha...')",
+        ])
+        prompt = ("Ek bilkul NAYA sawaal Hinglish mein banao - " + style + ". Theme: " + theme + ".\n"
                   "Sirf valid JSON do, is exact format mein, aur kuch nahi:\n"
                   '{"question": "...", "options": ["...", "...", "...", "..."], "correct": 0}\n'
-                  "Rules: 4 alag-alag options (har ek max 3 shabd), sirf ek sahi, 'correct' 0 se 3 ke beech "
+                  "Rules: 4 alag-alag options (har ek max 4 shabd), sirf ek sahi, 'correct' 0 se 3 ke beech "
                   "sahi option ka index ho, question max 2 line ka aur family-friendly ho. Random number seed: "
-                  + str(random.randint(1000, 9999)) + ". Ye purane riddles se bilkul alag hona chahiye, "
+                  + str(random.randint(1000, 9999)) + ". Ye purane sawaalon se bilkul alag hona chahiye, "
                   "inhe repeat mat karna: " + " | ".join(recent))
         messages = [
-            {"role": "system", "content": "Tum ek riddle-maker ho. Sirf valid JSON return karo, koi explanation ya markdown nahi."},
+            {"role": "system", "content": "Tum ek quiz-master ho jo Hinglish mein paheliyan aur trivia sawaal banata hai. Sirf valid JSON return karo, koi explanation ya markdown nahi."},
             {"role": "user", "content": prompt},
         ]
         raw = ask_ai_raw(messages, max_tokens=700)
@@ -504,10 +514,11 @@ def handle_riddle_command(chat_id, user_id):
     letters = ["A", "B", "C", "D"]
     buttons = [{"text": letters[i] + ") " + options[i], "callback_data": "rdl:" + rid + ":" + str(i)} for i in range(4)]
     keyboard = {"inline_keyboard": [buttons[0:2], buttons[2:4]]}
+    reward_lines = "\n".join(RIDDLE_MEDALS[i] + " " + str(i + 1) + ") +" + str(RIDDLE_WIN_XP[i]) + " XP" for i in range(RIDDLE_MAX_WINNERS))
     text = (riddle_header("RIDDLE TIME") +
             "❓ <b>" + escape_html(question) + "</b>\n\n"
             "⏳ Time: <b>" + str(RIDDLE_TIME_LIMIT) + " second</b>\n"
-            "🎁 Inaam: <b>+" + str(RIDDLE_WIN_XP) + " XP</b> (pehle sahi jawab wale ko)\n"
+            "🎁 Inaam (pehle " + str(RIDDLE_MAX_WINNERS) + " sahi jawab wale):\n" + reward_lines + "\n\n"
             "⚠️ Sabko sirf ek hi try milega\n\n"
             "👇 Sahi option choose karo")
     message_id = send_html_keyboard(chat_id, text, keyboard)
@@ -521,14 +532,21 @@ def handle_riddle_command(chat_id, user_id):
     with riddle_lock:
         active_riddles[chat_id] = {
             "id": rid, "question": question, "options": options, "correct": correct,
-            "attempted": set(), "expires": time.time() + RIDDLE_TIME_LIMIT,
+            "attempted": set(), "winners": [], "expires": time.time() + RIDDLE_TIME_LIMIT,
             "message_id": message_id, "timer": timer,
         }
     timer.start()
 
 
+def _riddle_winners_lines(riddle):
+    lines = []
+    for i, (wuid, wname) in enumerate(riddle["winners"]):
+        lines.append(RIDDLE_MEDALS[i] + " " + mention_html(wuid, wname) + " (+" + str(RIDDLE_WIN_XP[i]) + " XP)")
+    return lines
+
+
 def expire_riddle(chat_id, rid):
-    """Time khatam - riddle band karke sahi jawab bata deta hai."""
+    """Time khatam - riddle band karke sahi jawab aur ab tak ke winners bata deta hai."""
     with riddle_lock:
         riddle = active_riddles.get(chat_id)
         if not riddle or riddle["id"] != rid:
@@ -536,14 +554,19 @@ def expire_riddle(chat_id, rid):
         del active_riddles[chat_id]
     text = (riddle_header("TIME UP!") +
             "❓ " + escape_html(riddle["question"]) + "\n\n"
-            "✅ Sahi jawab tha: <b>" + escape_html(riddle["options"][riddle["correct"]]) + "</b>\n"
-            "😅 Is baar kisi ne sahi jawab nahi diya!")
+            "✅ Sahi jawab tha: <b>" + escape_html(riddle["options"][riddle["correct"]]) + "</b>\n\n")
+    winner_lines = _riddle_winners_lines(riddle)
+    if winner_lines:
+        text += "🏆 Winners:\n" + "\n".join(winner_lines)
+    else:
+        text += "😅 Is baar kisi ne sahi jawab nahi diya!"
     edit_message_html(chat_id, riddle["message_id"], text)
 
 
 def handle_riddle_press(callback):
-    """Riddle ke option button dabane par chalta hai. Har banda ek hi baar try kar sakta hai,
-    pehle sahi jawab wala jeetta hai."""
+    """Riddle ke option button dabane par chalta hai. Har banda ek hi baar try kar sakta hai.
+    Pehle 3 sahi jawab dene wale 1st/2nd/3rd position pe reward paate hain, phir riddle band
+    ho jaata hai (ya time khatam hone par, jo pehle ho)."""
     parts = callback.get('data', '').split(":")
     if len(parts) != 3:
         return
@@ -559,6 +582,7 @@ def handle_riddle_press(callback):
 
     outcome = None
     riddle = None
+    rank = None
     with riddle_lock:
         riddle = active_riddles.get(chat_id)
         if not riddle or riddle["id"] != rid:
@@ -570,33 +594,54 @@ def handle_riddle_press(callback):
         else:
             riddle["attempted"].add(uid)
             if idx == riddle["correct"]:
-                del active_riddles[chat_id]
-                outcome = "win"
+                rank = len(riddle["winners"])
+                riddle["winners"].append((uid, name))
+                outcome = "win_full" if len(riddle["winners"]) >= RIDDLE_MAX_WINNERS else "win_more"
+                if outcome == "win_full":
+                    del active_riddles[chat_id]
             else:
                 outcome = "wrong"
 
     if outcome == "gone":
         safe_run(answer_callback, callback['id'], "⌛ Ye riddle khatam ho chuka hai")
-    elif outcome == "expired":
+        return
+    if outcome == "expired":
         safe_run(answer_callback, callback['id'], "⏰ Time khatam ho gaya!")
-    elif outcome == "again":
+        return
+    if outcome == "again":
         safe_run(answer_callback, callback['id'], "😅 Tum ek baar try kar chuke ho")
-    elif outcome == "wrong":
+        return
+    if outcome == "wrong":
         safe_run(answer_callback, callback['id'], "❌ Galat jawab! Tumhara ek hi chance tha")
-    elif outcome == "win":
+        return
+
+    # outcome win_more ya win_full - dono mein XP milta hai
+    xp_gained = RIDDLE_WIN_XP[rank]
+    new_level = award_bonus_xp(chat_id, uid, name, xp_gained)
+    safe_run(answer_callback, callback['id'], RIDDLE_MEDALS[rank] + " Sahi jawab! +" + str(xp_gained) + " XP (position #" + str(rank + 1) + ")")
+
+    if outcome == "win_full":
         try:
             riddle["timer"].cancel()
         except Exception:
             pass
-        new_level = award_bonus_xp(chat_id, uid, name, RIDDLE_WIN_XP)
-        safe_run(answer_callback, callback['id'], "🎉 Sahi jawab! +" + str(RIDDLE_WIN_XP) + " XP")
         text = (riddle_header("RIDDLE SOLVED!") +
                 "❓ " + escape_html(riddle["question"]) + "\n\n"
-                "✅ Sahi jawab: <b>" + escape_html(riddle["options"][riddle["correct"]]) + "</b>\n"
-                "🏆 Winner: " + mention_html(uid, name) + " (+" + str(RIDDLE_WIN_XP) + " XP) 🎉")
+                "✅ Sahi jawab: <b>" + escape_html(riddle["options"][riddle["correct"]]) + "</b>\n\n"
+                "🏆 Winners:\n" + "\n".join(_riddle_winners_lines(riddle)))
         edit_message_html(chat_id, riddle["message_id"], text)
-        if new_level:
-            announce_level_up(chat_id, uid, name, new_level)
+    else:
+        reward_lines = "\n".join(RIDDLE_MEDALS[i] + " " + str(i + 1) + ") +" + str(RIDDLE_WIN_XP[i]) + " XP" for i in range(RIDDLE_MAX_WINNERS))
+        slots_left = RIDDLE_MAX_WINNERS - len(riddle["winners"])
+        text = (riddle_header("RIDDLE TIME") +
+                "❓ <b>" + escape_html(riddle["question"]) + "</b>\n\n"
+                "🎁 Inaam:\n" + reward_lines + "\n\n"
+                "🏆 Ab tak:\n" + "\n".join(_riddle_winners_lines(riddle)) + "\n\n"
+                "⏳ " + str(slots_left) + " jagah baaki hai - baaki log bhi try karo!")
+        edit_message_html(chat_id, riddle["message_id"], text)
+
+    if new_level:
+        announce_level_up(chat_id, uid, name, new_level)
 
 
 HISTORY_HOURS = 24
@@ -685,24 +730,36 @@ DM_DISCLAIMER = "DM mein hone wale kisi bhi spam/scam ki zimmedari group ya admi
 
 BAD_WORDS = [
     "chutiya", "chutia", "chutiye", "chutiyapa",
-    "madarchod", "mc", "behenchod", "bhenchod", "bc",
-    "bhosdike", "bhosdi", "bhosda",
+    "madarchod", "behenchod", "bhenchod",
+    "bhosdike", "bhosdi", "bhosda", "bhosdiwala",
     "gandu", "gaandu", "gaand",
     "lund", "lauda", "laude", "loda", "lode",
     "randi", "raand",
-    "chodu", "chod", "chudai",
-    "bsdk", "bkl",
+    "chodu", "chudai", "chutad",
+    "bsdk", "bkl", "mc bc",
     "fuck", "fucker", "fucking", "motherfucker",
     "bitch", "asshole", "bastard", "slut", "whore", "cunt", "dick", "pussy"
 ]
 
+# Ye chhote censor symbols hi kisi letter ki JAGAH allow hote hain (jaise 'ch*tiya',
+# 'ch#tiya') - digits, spaces, emoji, punctuation jaise normal characters allow NAHI
+# hote, warna "100", "2026", "??" jaise bilkul normal messages bhi galti se gaali
+# samajh liye jaate the (jo pehle ek bahut bada bug tha).
+CENSOR_SYMBOLS = "*#@$%!~^&+="
+
 
 def _word_evasion_pattern(word):
-    """Har letter ko uska exact letter YA koi bhi ek symbol/number (censor) se match
-    karta hai - isse 'ch*tiya', 'ch#tiya', 'ch1tiya', 'g@nd' jaise jaan-bujhkar
-    censor/evade kiye hue spellings bhi pakde jaate hain, sirf exact spelling nahi."""
-    parts = [r'(?:' + re.escape(ch) + r'|[^a-zA-Z])' for ch in word]
-    return re.compile(r'(?<![a-zA-Z])' + ''.join(parts) + r'(?![a-zA-Z])', re.IGNORECASE)
+    """Poora exact word match karta hai, YA sirf EK letter ko ek chhote censor-symbol se
+    replace kiya hua (jaise 'ch*tiya', 'ch#tiya') - baaki sab letters hamesha exact match
+    hone chahiye. Isse jaan-bujhkar censor kiya hua spelling bhi pakda jaata hai, lekin
+    random numbers/emoji/punctuation ab false-positive nahi denge."""
+    escaped = re.escape(word)
+    variants = [escaped]
+    for i in range(len(word)):
+        variant = re.escape(word[:i]) + '[' + re.escape(CENSOR_SYMBOLS) + ']' + re.escape(word[i + 1:])
+        variants.append(variant)
+    combined = '(?:' + '|'.join(variants) + ')'
+    return re.compile(r'(?<![a-zA-Z])' + combined + r'(?![a-zA-Z])', re.IGNORECASE)
 
 
 BAD_WORD_PATTERNS = [_word_evasion_pattern(w) for w in BAD_WORDS]
@@ -1078,7 +1135,8 @@ def handle_message(message):
             except Exception as e:
                 print("LINK DELETE ERROR: " + str(e))
             name = get_name(message.get('from', {}))
-            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
+            reason = "Link bheja: \"" + text[:60] + "\""
+            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id, reason)
             return
 
         # @mention: Owner/Admin exempt (moderation ke liye kabhi zaroori hota hai)
@@ -1090,7 +1148,8 @@ def handle_message(message):
             except Exception as e:
                 print("MENTION DELETE ERROR: " + str(e))
             name = get_name(message.get('from', {}))
-            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
+            reason = "Kisi ko @mention kiya: \"" + text[:60] + "\""
+            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id, reason)
             return
 
         # ---- Gaali filter (owner exempt) - message delete + warning dono ----
@@ -1100,7 +1159,8 @@ def handle_message(message):
             except Exception as e:
                 print("GAALI DELETE ERROR: " + str(e))
             name = get_name(message.get('from', {}))
-            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id)
+            reason = "Gaali di: \"" + text[:60] + "\""
+            safe_run(moderation_action_and_notify, "warn", chat_id, user_id, name, chat_id, message_id, reason)
             return
 
     # ---- XP / Birthday / Riddle - sabhi 'clean' messages pe chalte hain ----
@@ -1613,7 +1673,13 @@ def handle_callback(callback):
         subaction = parts[1]
         m_chat_id = int(parts[2])
         m_target_id = int(parts[3])
-        result_text = handle_modbtn(subaction, m_chat_id, m_target_id)
+        m_name = None
+        try:
+            r = requests.get(TELEGRAM_URL + "/getChatMember", params={"chat_id": m_chat_id, "user_id": m_target_id}, timeout=10)
+            m_name = get_name(r.json().get('result', {}).get('user', {}))
+        except Exception:
+            pass
+        result_text = handle_modbtn(subaction, m_chat_id, m_target_id, m_name)
         safe_run(answer_callback, callback['id'], "Done")
         try:
             requests.post(TELEGRAM_URL + "/editMessageText", json={
@@ -1742,7 +1808,7 @@ def handle_callback(callback):
     del pending_reports[report_id]
 
 
-def handle_modbtn(subaction, chat_id, target_id):
+def handle_modbtn(subaction, chat_id, target_id, target_name=None):
     if subaction == "unban":
         was_banned = safe_unban(chat_id, target_id)
         unrecord_moderation(chat_id, "ban", target_id)
@@ -1753,8 +1819,16 @@ def handle_modbtn(subaction, chat_id, target_id):
         if count > 0:
             count = count - 1
         chat_warns[target_id] = count
+        reasons_list = warn_reasons.setdefault(chat_id, {}).get(target_id)
+        if reasons_list:
+            reasons_list.pop()
         save_state()
         return "Warning kam kar di gayi. Ab count: " + str(count) + "/3"
+    elif subaction == "banapprove":
+        text, _ = do_moderation_action("ban", chat_id, target_id, target_name)
+        return "✅ Ban kar diya.\n\n" + text
+    elif subaction == "free":
+        return "🙏 Chhod diya, koi action nahi liya."
     return "Kuch nahi hua."
 
 
@@ -1772,6 +1846,7 @@ def save_state():
     try:
         data = {
             "warnings": {str(cid): {str(uid): c for uid, c in dict(warns).items()} for cid, warns in dict(warnings).items()},
+            "warn_reasons": {str(cid): {str(uid): list(r) for uid, r in dict(reasons).items()} for cid, reasons in dict(warn_reasons).items()},
             "moderation_records": {
                 str(cid): {
                     "banned": {str(uid): name for uid, name in dict(rec.get("banned", {})).items()},
@@ -1816,6 +1891,8 @@ def load_state():
             data = json.load(f)
         for cid_str, warns in data.get("warnings", {}).items():
             warnings[int(cid_str)] = {int(uid): c for uid, c in warns.items()}
+        for cid_str, reasons in data.get("warn_reasons", {}).items():
+            warn_reasons[int(cid_str)] = {int(uid): list(r) for uid, r in reasons.items()}
         for cid_str, rec in data.get("moderation_records", {}).items():
             moderation_records[int(cid_str)] = {
                 "banned": {int(uid): name for uid, name in rec.get("banned", {}).items()},
@@ -1839,6 +1916,8 @@ def load_state():
         print("STATE FILE nahi mila - fresh start")
     except Exception as e:
         print("STATE LOAD ERROR: " + str(e))
+
+
 def record_moderation(chat_id, kind, user_id, name):
     """kind: 'ban' ya 'mute' - /history mein dikhane ke liye yaad rakhta hai."""
     chat_records = moderation_records.setdefault(chat_id, {"banned": {}, "muted": {}})
@@ -1874,7 +1953,7 @@ def telegram_api_ok(response):
         return False, "response parse nahi hua"
 
 
-def do_moderation_action(action, chat_id, target_id, target_name=None):
+def do_moderation_action(action, chat_id, target_id, target_name=None, reason=None):
     if not target_name:
         target_name = "ye banda"
     if action == "ban":
@@ -1915,30 +1994,45 @@ def do_moderation_action(action, chat_id, target_id, target_name=None):
         chat_warns = warnings.setdefault(chat_id, {})
         count = chat_warns.get(target_id, 0) + 1
         chat_warns[target_id] = count
+
+        chat_reasons = warn_reasons.setdefault(chat_id, {})
+        reasons_list = chat_reasons.setdefault(target_id, [])
+        reasons_list.append(reason or "Warning di gayi")
         save_state()
+
         if count >= 3:
-            r = requests.post(TELEGRAM_URL + "/banChatMember", json={"chat_id": chat_id, "user_id": target_id}, timeout=10)
-            ok, desc = telegram_api_ok(r)
-            if not ok:
-                print("WARN-BAN FAILED: " + desc)
-                return (target_name + " ki 3 warning ho gayi thi, lekin ban nahi kar paaya - shayad mujhe 'Restrict Members' permission nahi mili hai. (" + desc + ")", "fail")
+            # PEHLE auto-ban ho jaata tha - ab NAHI. Sirf Owner ki DM mein Ban/Free
+            # buttons jaate hain, koi bhi bina Owner ki permission ke ban nahi hoga.
             chat_warns[target_id] = 0
+            final_reasons = list(reasons_list)
+            chat_reasons[target_id] = []
             save_state()
-            record_moderation(chat_id, "ban", target_id, target_name)
-            return (target_name + " ki 3 warning ho gayi, ban kar diya.", "ban")
+            if OWNER_ID:
+                title = known_chats.get(chat_id, "Group")
+                numbered = "\n".join(str(i + 1) + ". " + r for i, r in enumerate(final_reasons))
+                alert_text = ("⚠️ " + target_name + " ki 3 warning ho gayi hai (" + title + " mein).\n\n"
+                              "Kya hua tha:\n" + numbered + "\n\n"
+                              "Kya isko ban karna hai ya chhod dein? Bot khud kuch nahi karega, sirf tumhare"
+                              " decision ka wait karega.")
+                keyboard = {"inline_keyboard": [[
+                    {"text": "🔨 Ban karo", "callback_data": "modbtn:banapprove:" + str(chat_id) + ":" + str(target_id)},
+                    {"text": "🙏 Free chhodo", "callback_data": "modbtn:free:" + str(chat_id) + ":" + str(target_id)},
+                ]]}
+                safe_run(send_message_with_keyboard, OWNER_ID, alert_text, keyboard)
+            return (target_name + " ki 3 warning ho gayi - Owner ko DM bhej diya, unki permission se hi ban hoga.", "warn3")
         return (target_name + " ko warning di gayi (" + str(count) + "/3)", "warn")
     else:
         return (target_name + " pe koi action nahi liya gaya.", "none")
 
 
-def moderation_action_and_notify(action, chat_id, target_id, target_name, notify_chat_id, reply_to=None):
+def moderation_action_and_notify(action, chat_id, target_id, target_name, notify_chat_id, reply_to=None, reason=None):
     if action in ("ban", "kick", "mute", "warn"):
         protection = get_protection_message(chat_id, target_id)
         if protection:
             send_message(notify_chat_id, protection, reply_to)
             return
 
-    text, state = do_moderation_action(action, chat_id, target_id, target_name)
+    text, state = do_moderation_action(action, chat_id, target_id, target_name, reason)
     keyboard = None
     if state == "ban":
         keyboard = {"inline_keyboard": [[{"text": "Unban", "callback_data": "modbtn:unban:" + str(chat_id) + ":" + str(target_id)}]]}
@@ -2136,7 +2230,11 @@ def handle_warn(chat_id, message):
     if protection:
         send_message(chat_id, protection)
         return
-    moderation_action_and_notify("warn", chat_id, target['id'], get_name(target), chat_id)
+    admin_name = get_name(message.get('from', {}))
+    parts = (message.get('text') or '').split(maxsplit=1)
+    custom_reason = parts[1].strip() if len(parts) > 1 else None
+    reason = ("Admin (" + admin_name + ") ne manually warn kiya" + (": " + custom_reason if custom_reason else ""))
+    moderation_action_and_notify("warn", chat_id, target['id'], get_name(target), chat_id, reason=reason)
 
 
 def handle_unwarn(chat_id, message):
@@ -2151,6 +2249,9 @@ def handle_unwarn(chat_id, message):
         send_message(chat_id, get_name(target) + " ki koi warning hi nahi hai.")
         return
     chat_warns[target['id']] = current - 1
+    reasons_list = warn_reasons.setdefault(chat_id, {}).get(target['id'])
+    if reasons_list:
+        reasons_list.pop()
     save_state()
     send_message(chat_id, get_name(target) + " ki 1 warning kam kar di. Ab: " + str(chat_warns[target['id']]) + "/3")
 
