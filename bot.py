@@ -466,13 +466,13 @@ def send_html_keyboard(chat_id, text, keyboard):
         return None
 
 
-def edit_message_html(chat_id, message_id, text):
-    """Message ka text badalta hai aur buttons hata deta hai."""
+def edit_message_html(chat_id, message_id, text, remove_keyboard=True):
+    """HTML message edit karta hai. Riddle khatam hone par hi buttons hatata hai."""
     try:
-        requests.post(TELEGRAM_URL + "/editMessageText", json={
-            "chat_id": chat_id, "message_id": message_id, "text": text,
-            "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []}
-        }, timeout=15)
+        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML"}
+        if remove_keyboard:
+            payload["reply_markup"] = {"inline_keyboard": []}
+        requests.post(TELEGRAM_URL + "/editMessageText", json=payload, timeout=15)
     except Exception as e:
         print("EDIT HTML ERROR: " + str(e))
 
@@ -638,7 +638,7 @@ def handle_riddle_press(callback):
                 "🎁 Inaam:\n" + reward_lines + "\n\n"
                 "🏆 Ab tak:\n" + "\n".join(_riddle_winners_lines(riddle)) + "\n\n"
                 "⏳ " + str(slots_left) + " jagah baaki hai - baaki log bhi try karo!")
-        edit_message_html(chat_id, riddle["message_id"], text)
+        edit_message_html(chat_id, riddle["message_id"], text, remove_keyboard=False)
 
     if new_level:
         announce_level_up(chat_id, uid, name, new_level)
@@ -1269,11 +1269,11 @@ def handle_message(message):
     is_reply_to_bot = False
     if reply_to:
         from_user = reply_to.get('from', {})
-        if from_user.get('username') == BOT_USERNAME:
-            is_reply_to_bot = True
+        replied_username = (from_user.get('username') or '').lower()
+        is_reply_to_bot = bool(from_user.get('is_bot')) or replied_username == BOT_USERNAME.lower()
 
     khan_called = mentions_khan(text)
-    should_reply = is_reply_to_bot or khan_called
+    should_reply = bool(reply_to) or khan_called
 
     if should_reply:
         # Agar bot humare MAIN group ke alawa kisi doosre group mein hai, to sirf unhi
@@ -3276,12 +3276,36 @@ def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
         print("SEND KEYBOARD ERROR: " + str(e))
 
 
+BOT_COMMANDS = [
+    {"command": c, "description": d} for c, d in [
+        ("help", "Commands ki list"), ("rule", "Group rules dekho"), ("rules", "Group rules dekho"),
+        ("rank", "Apna XP aur level dekho"), ("level", "Apna XP aur level dekho"), ("leaderboard", "Top active members dekho"),
+        ("top", "Top active members dekho"), ("setbirthday", "Birthday save karo DD-MM"), ("report", "Reply karke report bhejo"),
+        ("riddle", "Riddle start karo owner only"), ("ban", "Reply karke member ban karo"), ("kick", "Reply karke member hatao"),
+        ("unban", "Member ko unban karo"), ("unbanall", "Sab banned members unban karo"), ("mute", "Reply karke member mute karo"),
+        ("unmute", "Member ko unmute karo"), ("warn", "Reply karke warning do"), ("unwarn", "Member ki warning kam karo"),
+        ("pin", "Reply message pin karo"), ("setwelcome", "Welcome message badlo"), ("linkson", "Link filter on karo"),
+        ("linksoff", "Link filter off karo"), ("start", "Bot start karo"), ("panel", "Owner control panel"), ("history", "Moderation history dekho")
+    ]
+]
+
+def register_group_commands():
+    if not TELEGRAM_TOKEN:
+        print("COMMAND MENU SKIPPED: TELEGRAM_TOKEN set nahi hai")
+        return
+    try:
+        response = requests.post(TELEGRAM_URL + "/setMyCommands", json={"commands": BOT_COMMANDS, "scope": {"type": "all_group_chats"}}, timeout=15)
+        ok, description = telegram_api_ok(response)
+        if not ok: print("COMMAND MENU ERROR: " + description)
+    except Exception as e:
+        print("COMMAND MENU ERROR: " + str(e))
+
 @app.route('/')
 def home():
     return "Bot is running!"
 
-
 if __name__ == '__main__':
     load_state()
+    register_group_commands()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
