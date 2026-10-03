@@ -661,7 +661,7 @@ CHHOTI-CHHOTI/MUNDANE BAATON KA JAWAB - YE SABSE ZYADA MATTER KARTA HAI: Zyadata
 - Chhote reactions ("Haha", "Lol", "Nice", "Ok") ka jawab bhi ek-jaisa mat rakho - kabhi emoji se hi reply de do (👍, 😂), kabhi 2-3 shabd, variety rakho jaise real chatting mein hoti hai.
 - Agar koi first time "Hi/Hello" bolta hai to normal casual greeting do, jaise pehli baar milne wale dost ko - zyada excited ya zyada formal dono avoid karo.
 - Bottom line: chhoti baaton mein bhi thoda "insaan jaisa randomness/personality" dikhna chahiye - kabhi thoda lazy mood, kabhi excited, kabhi busy - taaki koi bhi do replies bilkul identical na lagein aur pattern na pakड़ में aaye ki ye ek bot hai.
-- HAR chhote se chhota message bhi pehle dhyan se samjho: greeting, haan/na, doubt, reaction, sarcasm, agreement, narazgi, mazak ya kisi purane message ka reply kya hai. Agar message kisi quoted/replied message par hai to dono ko mila kar matlab pakdo. Phir sirf usi baat ka chhota, natural aur relevant jawab do; generic/fixed reply, random topic ya unnecessary sawaal mat jodo.
+- Har chhote message, emoji aur GIF ka mood/context samjho. Emoji kabhi akela mat bhejo; saath mein chhota relevant text likho, jaise "Haan 👍" ya "Sahi bola 😄". Sad reaction/GIF par soft concern dikhao, jaise "Kya hua bhai, udaas kyu hai? 😔".
 
 Zaroori niyam:
 - Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo.
@@ -1115,7 +1115,7 @@ def handle_message(message):
                 safe_run(send_message, chat_id, leave_text, None, "HTML")
         return
 
-    if not text:
+    if not text and not message.get('animation'):
         return
 
     if user_id in waiting_for_welcome and waiting_for_welcome[user_id] == chat_id:
@@ -1275,7 +1275,7 @@ def handle_message(message):
         is_reply_to_bot = bool(from_user.get('is_bot')) or replied_username == BOT_USERNAME.lower()
 
     khan_called = mentions_khan(text)
-    should_reply = bool(reply_to) or khan_called
+    should_reply = bool(reply_to) or khan_called or bool(message.get('animation'))
 
     if should_reply:
         # Agar bot humare MAIN group ke alawa kisi doosre group mein hai, to sirf unhi
@@ -1319,6 +1319,24 @@ def handle_message(message):
 
             safe_run(send_typing_action, chat_id, "upload_photo")
             safe_run(handle_image_request, chat_id, message_id, image_prompt, style_reference)
+            return
+
+        # GIF (Telegram animation) khud bhejne ya GIF ko reply karne par uska pehla frame vision se samjho.
+        gif_to_analyze = None
+        if message.get('animation'):
+            gif_to_analyze = message['animation'].get('file_id')
+        elif reply_to and reply_to.get('animation'):
+            gif_to_analyze = reply_to['animation'].get('file_id')
+        if gif_to_analyze:
+            with TypingIndicator(chat_id, "typing"):
+                gif_bytes = get_telegram_file_bytes(gif_to_analyze)
+                frame_bytes = gif_first_frame_to_jpeg(gif_bytes) if gif_bytes else None
+                gif_question = user_text or "Is GIF ka mood aur reaction dhyan se samajhkar short, natural Hinglish reply do."
+                gif_reply = analyze_photo_with_question(frame_bytes, gif_question) if frame_bytes else None
+            if gif_reply:
+                safe_run(send_message, chat_id, gif_reply, message_id)
+            else:
+                safe_run(send_message, chat_id, "GIF dekhne mein dikkat aayi yaar, caption ya thoda bata do kya scene hai 🙂", message_id)
             return
 
         # Agar reply kisi photo pe hai, ya khud is message mein photo hai, to use dekhkar jawab do
@@ -2853,9 +2871,11 @@ def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
             q_name, q_text = quoted_context
             messages_for_ai.append({
                 "role": "system",
-                "content": "[REPLY CONTEXT: User ne " + q_name + " ke is message ko reply kiya hai: \"" + trim(q_text, 1000) +
-                            "\". Context samajhkar user ke naye message ka short, seedha aur relevant jawab do. "
-                            "Quoted message ko explain/summarize mat karna aur 'iska matlab' jaisi baat mat bolna; normal dost ki tarah reply kis baat par hua hai woh samajhkar jawab do.]"
+                "content": "[Sirf background context ke liye, isko explain ya describe MAT karna: " + q_name +
+                            " ne pehle ye kaha tha: \"" + trim(q_text, 1000) + "\". Neeche wala message usi ka reply hai. "
+                            "Bas is context ko dhyan mein rakhkar, jaise ek dost ko pura pata hota hai kis baat pe baat ho rahi hai "
+                            "waise hi seedha, natural jawab do - kabhi bhi 'iska matlab tha' ya 'reply ka matlab' jaisa kuch mat bolo, "
+                            "bas normal conversation jaisa jawab do.]"
             })
 
         # sirf jab query ko current/web info chahiye, tabhi alag se search karo
@@ -3177,6 +3197,24 @@ def get_telegram_file_bytes(file_id):
         return None
 
 
+def gif_first_frame_to_jpeg(gif_bytes):
+    """Animated GIF ka pehla frame JPEG mein convert karta hai, jise vision model padh sake."""
+    if not gif_bytes:
+        return None
+    try:
+        from PIL import Image
+        frame = Image.open(io.BytesIO(gif_bytes))
+        frame.seek(0)
+        frame = frame.convert("RGB")
+        frame.thumbnail((1024, 1024))
+        output = io.BytesIO()
+        frame.save(output, format="JPEG", quality=88)
+        return output.getvalue()
+    except Exception as e:
+        print("GIF FRAME ERROR: " + str(e))
+        return None
+
+
 def analyze_photo_with_question(image_bytes, question):
     """Gemini ki vision capability se photo ko dekhkar sawaal ka jawab deta hai."""
     if not GEMINI_API_KEY:
@@ -3277,32 +3315,19 @@ def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
 
 
 BOT_COMMANDS = [{"command": c, "description": d} for c, d in [
-    ("help", "Commands ki list"), ("rule", "Group rules dekho"), ("rules", "Group rules dekho"), ("rank", "Apna XP aur level dekho"),
-    ("level", "Apna XP aur level dekho"), ("leaderboard", "Top active members dekho"), ("top", "Top active members dekho"),
-    ("setbirthday", "Birthday save karo DD-MM"), ("report", "Reply karke report bhejo"), ("riddle", "Riddle start karo owner only"),
-    ("ban", "Reply karke member ban karo"), ("kick", "Reply karke member hatao"), ("unban", "Member ko unban karo"), ("unbanall", "Sab banned members unban karo"),
-    ("mute", "Reply karke member mute karo"), ("unmute", "Member ko unmute karo"), ("warn", "Reply karke warning do"), ("unwarn", "Member ki warning kam karo"),
-    ("pin", "Reply message pin karo"), ("setwelcome", "Welcome message badlo"), ("linkson", "Link filter on karo"), ("linksoff", "Link filter off karo"),
-    ("start", "Bot start karo"), ("panel", "Owner control panel"), ("history", "Moderation history dekho")
+    ("help", "Commands ki list"), ("rule", "Group rules dekho"), ("rules", "Group rules dekho"), ("rank", "Apna XP aur level dekho"), ("level", "Apna XP aur level dekho"),
+    ("leaderboard", "Top active members dekho"), ("top", "Top active members dekho"), ("setbirthday", "Birthday save karo DD-MM"), ("report", "Reply karke report bhejo"),
+    ("riddle", "Riddle start karo owner only"), ("ban", "Reply karke member ban karo"), ("kick", "Reply karke member hatao"), ("unban", "Member ko unban karo"),
+    ("unbanall", "Sab banned members unban karo"), ("mute", "Reply karke member mute karo"), ("unmute", "Member ko unmute karo"), ("warn", "Reply karke warning do"),
+    ("unwarn", "Member ki warning kam karo"), ("pin", "Reply message pin karo"), ("setwelcome", "Welcome message badlo"), ("linkson", "Link filter on karo"),
+    ("linksoff", "Link filter off karo"), ("start", "Bot start karo"), ("panel", "Owner control panel"), ("history", "Moderation history dekho")
 ]]
-
 def register_group_commands():
-    if not TELEGRAM_TOKEN:
-        print("COMMAND MENU SKIPPED: TELEGRAM_TOKEN set nahi hai")
-        return
-    try:
-        response = requests.post(TELEGRAM_URL + "/setMyCommands", json={"commands": BOT_COMMANDS, "scope": {"type": "all_group_chats"}}, timeout=15)
-        ok, description = telegram_api_ok(response)
-        if not ok: print("COMMAND MENU ERROR: " + description)
-    except Exception as e:
-        print("COMMAND MENU ERROR: " + str(e))
-
+    if not TELEGRAM_TOKEN: return
+    try: requests.post(TELEGRAM_URL+"/setMyCommands",json={"commands":BOT_COMMANDS,"scope":{"type":"all_group_chats"}},timeout=15)
+    except Exception as e: print("COMMAND MENU ERROR: "+str(e))
 @app.route('/')
-def home():
-    return "Bot is running!"
-
+def home(): return "Bot is running!"
 if __name__ == '__main__':
-    load_state()
-    register_group_commands()
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, threaded=True)
+    load_state(); register_group_commands()
+    port=int(os.environ.get("PORT",5000)); app.run(host='0.0.0.0',port=port,threaded=True)
