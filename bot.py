@@ -661,7 +661,7 @@ CHHOTI-CHHOTI/MUNDANE BAATON KA JAWAB - YE SABSE ZYADA MATTER KARTA HAI: Zyadata
 - Chhote reactions ("Haha", "Lol", "Nice", "Ok") ka jawab bhi ek-jaisa mat rakho - kabhi emoji se hi reply de do (👍, 😂), kabhi 2-3 shabd, variety rakho jaise real chatting mein hoti hai.
 - Agar koi first time "Hi/Hello" bolta hai to normal casual greeting do, jaise pehli baar milne wale dost ko - zyada excited ya zyada formal dono avoid karo.
 - Bottom line: chhoti baaton mein bhi thoda "insaan jaisa randomness/personality" dikhna chahiye - kabhi thoda lazy mood, kabhi excited, kabhi busy - taaki koi bhi do replies bilkul identical na lagein aur pattern na pakड़ में aaye ki ye ek bot hai.
-- Har chhote message, emoji aur GIF ka mood/context samjho. Emoji kabhi akela mat bhejo; saath mein chhota relevant text likho, jaise "Haan 👍" ya "Sahi bola 😄". Sad reaction/GIF par soft concern dikhao, jaise "Kya hua bhai, udaas kyu hai? 😔".
+- EMOTIONAL INTELLIGENCE: 😡😢🥲😔💔😤 jaise emoji/GIF dekhte hi same fixed "kya hua bhai" mat bolna. Pehle dekho message kisi purane message ka reply hai kya; agar haan, us purane message mein gusse/udaasi ki wajah dhoondo aur wahi mention karke empathetic jawab do. Jaise "match cancel" ke reply mein 😡 aaye to bolo "Haan yaar, match cancel ho to gussa aata hi hai 😤". Agar context mein reason na ho tabhi pucho "Kya hua bhai, kis baat ka gussa hai?". User "sab theek hai", "kuch nahi", "chill" ya reassurance de to concern ko repeat mat karo; seedha normal/supportive bolo, jaise "Theek hai bhai, bas mood sahi rakh 🙂". Sad baat par soft, gusse par calm, excitement par positive, aur mazak par halka response do. Emoji kabhi akela mat bhejo; hamesha emoji ke saath 1-2 relevant words likho.
 
 Zaroori niyam:
 - Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo.
@@ -729,6 +729,9 @@ MENTION_PATTERN = re.compile(r'@(\w{4,})')  # @username tag karna - 4+ chars, re
 
 DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
 DM_DISCLAIMER = "DM mein hone wale kisi bhi spam/scam ki zimmedari group ya admin ki nahi hogi, khud dhyan rakhna bhai."
+
+# Emotional emoji bina tag ke bheje jaayen tab bhi Khan unka mood/context samajhkar react karega.
+EMOTIONAL_EMOJI_PATTERN = re.compile(r'[😡😠🤬😤😢😭🥲😔😞😟😕🥺💔😞😩😫😨😰😥😓😒🙄😑]')
 
 BAD_WORDS = [
     "chutiya", "chutia", "chutiye", "chutiyapa",
@@ -1275,7 +1278,8 @@ def handle_message(message):
         is_reply_to_bot = bool(from_user.get('is_bot')) or replied_username == BOT_USERNAME.lower()
 
     khan_called = mentions_khan(text)
-    should_reply = bool(reply_to) or khan_called or bool(message.get('animation'))
+    has_emotional_emoji = bool(EMOTIONAL_EMOJI_PATTERN.search(text))
+    should_reply = bool(reply_to) or khan_called or has_emotional_emoji or bool(message.get('animation'))
 
     if should_reply:
         # Agar bot humare MAIN group ke alawa kisi doosre group mein hai, to sirf unhi
@@ -1321,7 +1325,7 @@ def handle_message(message):
             safe_run(handle_image_request, chat_id, message_id, image_prompt, style_reference)
             return
 
-        # GIF (Telegram animation) khud bhejne ya GIF ko reply karne par uska pehla frame vision se samjho.
+        # GIF khud bhejne ya GIF ko reply karne par uska pehla frame vision se samjho.
         gif_to_analyze = None
         if message.get('animation'):
             gif_to_analyze = message['animation'].get('file_id')
@@ -1331,12 +1335,9 @@ def handle_message(message):
             with TypingIndicator(chat_id, "typing"):
                 gif_bytes = get_telegram_file_bytes(gif_to_analyze)
                 frame_bytes = gif_first_frame_to_jpeg(gif_bytes) if gif_bytes else None
-                gif_question = user_text or "Is GIF ka mood aur reaction dhyan se samajhkar short, natural Hinglish reply do."
+                gif_question = user_text or "Is GIF ka mood aur context samajhkar short, sensitive Hinglish reply do."
                 gif_reply = analyze_photo_with_question(frame_bytes, gif_question) if frame_bytes else None
-            if gif_reply:
-                safe_run(send_message, chat_id, gif_reply, message_id)
-            else:
-                safe_run(send_message, chat_id, "GIF dekhne mein dikkat aayi yaar, caption ya thoda bata do kya scene hai 🙂", message_id)
+            safe_run(send_message, chat_id, gif_reply or "GIF dekhne mein dikkat aayi yaar, caption ya thoda bata do kya scene hai 🙂", message_id)
             return
 
         # Agar reply kisi photo pe hai, ya khud is message mein photo hai, to use dekhkar jawab do
@@ -3198,7 +3199,7 @@ def get_telegram_file_bytes(file_id):
 
 
 def gif_first_frame_to_jpeg(gif_bytes):
-    """Animated GIF ka pehla frame JPEG mein convert karta hai, jise vision model padh sake."""
+    """GIF ka pehla frame JPEG banata hai, jise vision model mood samajhne ke liye padh sakta hai."""
     if not gif_bytes:
         return None
     try:
@@ -3314,14 +3315,7 @@ def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
         print("SEND KEYBOARD ERROR: " + str(e))
 
 
-BOT_COMMANDS = [{"command": c, "description": d} for c, d in [
-    ("help", "Commands ki list"), ("rule", "Group rules dekho"), ("rules", "Group rules dekho"), ("rank", "Apna XP aur level dekho"), ("level", "Apna XP aur level dekho"),
-    ("leaderboard", "Top active members dekho"), ("top", "Top active members dekho"), ("setbirthday", "Birthday save karo DD-MM"), ("report", "Reply karke report bhejo"),
-    ("riddle", "Riddle start karo owner only"), ("ban", "Reply karke member ban karo"), ("kick", "Reply karke member hatao"), ("unban", "Member ko unban karo"),
-    ("unbanall", "Sab banned members unban karo"), ("mute", "Reply karke member mute karo"), ("unmute", "Member ko unmute karo"), ("warn", "Reply karke warning do"),
-    ("unwarn", "Member ki warning kam karo"), ("pin", "Reply message pin karo"), ("setwelcome", "Welcome message badlo"), ("linkson", "Link filter on karo"),
-    ("linksoff", "Link filter off karo"), ("start", "Bot start karo"), ("panel", "Owner control panel"), ("history", "Moderation history dekho")
-]]
+BOT_COMMANDS = [{"command": c, "description": d} for c, d in [("help","Commands ki list"),("rule","Group rules dekho"),("rules","Group rules dekho"),("rank","Apna XP aur level dekho"),("level","Apna XP aur level dekho"),("leaderboard","Top active members dekho"),("top","Top active members dekho"),("setbirthday","Birthday save karo DD-MM"),("report","Reply karke report bhejo"),("riddle","Riddle start karo owner only"),("ban","Reply karke member ban karo"),("kick","Reply karke member hatao"),("unban","Member ko unban karo"),("unbanall","Sab banned members unban karo"),("mute","Reply karke member mute karo"),("unmute","Member ko unmute karo"),("warn","Reply karke warning do"),("unwarn","Member ki warning kam karo"),("pin","Reply message pin karo"),("setwelcome","Welcome message badlo"),("linkson","Link filter on karo"),("linksoff","Link filter off karo"),("start","Bot start karo"),("panel","Owner control panel"),("history","Moderation history dekho")]]
 def register_group_commands():
     if not TELEGRAM_TOKEN: return
     try: requests.post(TELEGRAM_URL+"/setMyCommands",json={"commands":BOT_COMMANDS,"scope":{"type":"all_group_chats"}},timeout=15)
