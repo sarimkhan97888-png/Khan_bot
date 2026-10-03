@@ -466,13 +466,13 @@ def send_html_keyboard(chat_id, text, keyboard):
         return None
 
 
-def edit_message_html(chat_id, message_id, text, remove_keyboard=True):
-    """HTML message edit karta hai. Riddle khatam hone par hi buttons hatata hai."""
+def edit_message_html(chat_id, message_id, text):
+    """Message ka text badalta hai aur buttons hata deta hai."""
     try:
-        payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML"}
-        if remove_keyboard:
-            payload["reply_markup"] = {"inline_keyboard": []}
-        requests.post(TELEGRAM_URL + "/editMessageText", json=payload, timeout=15)
+        requests.post(TELEGRAM_URL + "/editMessageText", json={
+            "chat_id": chat_id, "message_id": message_id, "text": text,
+            "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []}
+        }, timeout=15)
     except Exception as e:
         print("EDIT HTML ERROR: " + str(e))
 
@@ -638,7 +638,8 @@ def handle_riddle_press(callback):
                 "🎁 Inaam:\n" + reward_lines + "\n\n"
                 "🏆 Ab tak:\n" + "\n".join(_riddle_winners_lines(riddle)) + "\n\n"
                 "⏳ " + str(slots_left) + " jagah baaki hai - baaki log bhi try karo!")
-        edit_message_html(chat_id, riddle["message_id"], text, remove_keyboard=False)
+        # Pehle do winners ke baad riddle message edit nahi hoga; buttons visible rahenge.
+        pass
 
     if new_level:
         announce_level_up(chat_id, uid, name, new_level)
@@ -660,6 +661,7 @@ CHHOTI-CHHOTI/MUNDANE BAATON KA JAWAB - YE SABSE ZYADA MATTER KARTA HAI: Zyadata
 - Chhote reactions ("Haha", "Lol", "Nice", "Ok") ka jawab bhi ek-jaisa mat rakho - kabhi emoji se hi reply de do (👍, 😂), kabhi 2-3 shabd, variety rakho jaise real chatting mein hoti hai.
 - Agar koi first time "Hi/Hello" bolta hai to normal casual greeting do, jaise pehli baar milne wale dost ko - zyada excited ya zyada formal dono avoid karo.
 - Bottom line: chhoti baaton mein bhi thoda "insaan jaisa randomness/personality" dikhna chahiye - kabhi thoda lazy mood, kabhi excited, kabhi busy - taaki koi bhi do replies bilkul identical na lagein aur pattern na pakड़ में aaye ki ye ek bot hai.
+- HAR chhote se chhota message bhi pehle dhyan se samjho: greeting, haan/na, doubt, reaction, sarcasm, agreement, narazgi, mazak ya kisi purane message ka reply kya hai. Agar message kisi quoted/replied message par hai to dono ko mila kar matlab pakdo. Phir sirf usi baat ka chhota, natural aur relevant jawab do; generic/fixed reply, random topic ya unnecessary sawaal mat jodo.
 
 Zaroori niyam:
 - Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo.
@@ -2851,11 +2853,9 @@ def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
             q_name, q_text = quoted_context
             messages_for_ai.append({
                 "role": "system",
-                "content": "[Sirf background context ke liye, isko explain ya describe MAT karna: " + q_name +
-                            " ne pehle ye kaha tha: \"" + trim(q_text, 1000) + "\". Neeche wala message usi ka reply hai. "
-                            "Bas is context ko dhyan mein rakhkar, jaise ek dost ko pura pata hota hai kis baat pe baat ho rahi hai "
-                            "waise hi seedha, natural jawab do - kabhi bhi 'iska matlab tha' ya 'reply ka matlab' jaisa kuch mat bolo, "
-                            "bas normal conversation jaisa jawab do.]"
+                "content": "[REPLY CONTEXT: User ne " + q_name + " ke is message ko reply kiya hai: \"" + trim(q_text, 1000) +
+                            "\". Context samajhkar user ke naye message ka short, seedha aur relevant jawab do. "
+                            "Quoted message ko explain/summarize mat karna aur 'iska matlab' jaisi baat mat bolna; normal dost ki tarah reply kis baat par hua hai woh samajhkar jawab do.]"
             })
 
         # sirf jab query ko current/web info chahiye, tabhi alag se search karo
@@ -3276,18 +3276,15 @@ def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
         print("SEND KEYBOARD ERROR: " + str(e))
 
 
-BOT_COMMANDS = [
-    {"command": c, "description": d} for c, d in [
-        ("help", "Commands ki list"), ("rule", "Group rules dekho"), ("rules", "Group rules dekho"),
-        ("rank", "Apna XP aur level dekho"), ("level", "Apna XP aur level dekho"), ("leaderboard", "Top active members dekho"),
-        ("top", "Top active members dekho"), ("setbirthday", "Birthday save karo DD-MM"), ("report", "Reply karke report bhejo"),
-        ("riddle", "Riddle start karo owner only"), ("ban", "Reply karke member ban karo"), ("kick", "Reply karke member hatao"),
-        ("unban", "Member ko unban karo"), ("unbanall", "Sab banned members unban karo"), ("mute", "Reply karke member mute karo"),
-        ("unmute", "Member ko unmute karo"), ("warn", "Reply karke warning do"), ("unwarn", "Member ki warning kam karo"),
-        ("pin", "Reply message pin karo"), ("setwelcome", "Welcome message badlo"), ("linkson", "Link filter on karo"),
-        ("linksoff", "Link filter off karo"), ("start", "Bot start karo"), ("panel", "Owner control panel"), ("history", "Moderation history dekho")
-    ]
-]
+BOT_COMMANDS = [{"command": c, "description": d} for c, d in [
+    ("help", "Commands ki list"), ("rule", "Group rules dekho"), ("rules", "Group rules dekho"), ("rank", "Apna XP aur level dekho"),
+    ("level", "Apna XP aur level dekho"), ("leaderboard", "Top active members dekho"), ("top", "Top active members dekho"),
+    ("setbirthday", "Birthday save karo DD-MM"), ("report", "Reply karke report bhejo"), ("riddle", "Riddle start karo owner only"),
+    ("ban", "Reply karke member ban karo"), ("kick", "Reply karke member hatao"), ("unban", "Member ko unban karo"), ("unbanall", "Sab banned members unban karo"),
+    ("mute", "Reply karke member mute karo"), ("unmute", "Member ko unmute karo"), ("warn", "Reply karke warning do"), ("unwarn", "Member ki warning kam karo"),
+    ("pin", "Reply message pin karo"), ("setwelcome", "Welcome message badlo"), ("linkson", "Link filter on karo"), ("linksoff", "Link filter off karo"),
+    ("start", "Bot start karo"), ("panel", "Owner control panel"), ("history", "Moderation history dekho")
+]]
 
 def register_group_commands():
     if not TELEGRAM_TOKEN:
