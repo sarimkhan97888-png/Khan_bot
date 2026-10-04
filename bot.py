@@ -296,6 +296,9 @@ def handle_rank(chat_id, user_id, name):
     else:
         lines.append("🌟 Tum sabse upar ke level pe ho!")
     lines.append("🏆 Group rank: <b>#" + str(position) + "</b> / " + str(len(ranking)))
+    card = render_rank_card(name, level, xp, pct, position, len(ranking))
+    if card and _send_photo_bytes(chat_id, card, "🏅 " + name + " • " + level + "\n✨ " + fmt_xp(xp) + " XP"):
+        return
     send_message(chat_id, "\n".join(lines), None, "HTML")
 
 
@@ -991,7 +994,8 @@ def _send_photo_bytes(chat_id, photo_bytes, caption, reply_markup=None):
 def _card_image(title, lines, color=(42, 89, 160)):
     try:
         from PIL import Image, ImageDraw, ImageFont
-        img = Image.new("RGB", (1000, 600), color)
+        asset="lucky_winner.png" if "WINNER" in title else "lucky_start.png"
+        img=Image.open(os.path.join(os.path.dirname(__file__),"assets",asset)).convert("RGB") if os.path.exists(os.path.join(os.path.dirname(__file__),"assets",asset)) else Image.new("RGB",(1000,600),color)
         d = ImageDraw.Draw(img); font = ImageFont.load_default()
         d.rectangle((25,25,975,575), outline=(255,215,0), width=4)
         d.text((70,70), title, fill="white", font=font)
@@ -1001,6 +1005,17 @@ def _card_image(title, lines, color=(42, 89, 160)):
         out=io.BytesIO(); img.save(out, "PNG"); return out.getvalue()
     except Exception as e:
         print("CARD IMAGE ERROR: " + str(e)); return None
+
+def render_rank_card(name, level, xp, pct, position, total):
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        key=re.sub(r"[^a-z]","",level.lower()); img=Image.open(os.path.join(os.path.dirname(__file__),"assets",key+".png")).convert("RGB")
+        d=ImageDraw.Draw(img); f=ImageFont.load_default(); d.rounded_rectangle((70,80,1130,640),25,fill=(0,0,0,150),outline="white",width=3)
+        y=125
+        for s in ["KHAN RANK CARD",name,level,"XP: "+fmt_xp(xp),"Group Rank: #"+str(position)+" / "+str(total)]: d.text((120,y),s,fill="white",font=f);y+=75
+        d.rounded_rectangle((120,530,1080,570),15,outline="white",width=3);d.rounded_rectangle((124,534,124+int(952*pct/100),566),12,fill=(255,215,0))
+        o=io.BytesIO();img.save(o,"PNG");return o.getvalue()
+    except Exception as e: print("RANK CARD ERROR: "+str(e));return None
 
 def post_daily_lucky(chat_id):
     day = datetime.now(IST).date().isoformat()
