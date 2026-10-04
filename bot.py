@@ -11,6 +11,8 @@ import wave
 import threading
 import difflib
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
 
@@ -44,6 +46,9 @@ waiting_for_reason = {}
 known_chats = {}
 group_settings = {}
 panel_state = {}
+lucky_draws = {}  # chat_id -> active daily draw
+lucky_scheduler_started = False
+IST = ZoneInfo("Asia/Kolkata")
 waiting_for_welcome = {}
 known_users = {}  # chat_id -> {name_lower: {"id": user_id, "name": display_name}}
 moderation_records = {}  # chat_id -> {"banned": {user_id: name}, "muted": {user_id: name}} - /history ke liye
@@ -638,8 +643,7 @@ def handle_riddle_press(callback):
                 "🎁 Inaam:\n" + reward_lines + "\n\n"
                 "🏆 Ab tak:\n" + "\n".join(_riddle_winners_lines(riddle)) + "\n\n"
                 "⏳ " + str(slots_left) + " jagah baaki hai - baaki log bhi try karo!")
-        # Pehle do winners ke baad riddle message edit nahi hoga; buttons visible rahenge.
-        pass
+        edit_message_html(chat_id, riddle["message_id"], text)
 
     if new_level:
         announce_level_up(chat_id, uid, name, new_level)
@@ -661,7 +665,6 @@ CHHOTI-CHHOTI/MUNDANE BAATON KA JAWAB - YE SABSE ZYADA MATTER KARTA HAI: Zyadata
 - Chhote reactions ("Haha", "Lol", "Nice", "Ok") ka jawab bhi ek-jaisa mat rakho - kabhi emoji se hi reply de do (👍, 😂), kabhi 2-3 shabd, variety rakho jaise real chatting mein hoti hai.
 - Agar koi first time "Hi/Hello" bolta hai to normal casual greeting do, jaise pehli baar milne wale dost ko - zyada excited ya zyada formal dono avoid karo.
 - Bottom line: chhoti baaton mein bhi thoda "insaan jaisa randomness/personality" dikhna chahiye - kabhi thoda lazy mood, kabhi excited, kabhi busy - taaki koi bhi do replies bilkul identical na lagein aur pattern na pakड़ में aaye ki ye ek bot hai.
-- EMOTIONAL INTELLIGENCE: 😡😢🥲😔💔😤 jaise emoji/GIF dekhte hi same fixed "kya hua bhai" mat bolna. Pehle dekho message kisi purane message ka reply hai kya; agar haan, us purane message mein gusse/udaasi ki wajah dhoondo aur wahi mention karke empathetic jawab do. Jaise "match cancel" ke reply mein 😡 aaye to bolo "Haan yaar, match cancel ho to gussa aata hi hai 😤". Agar context mein reason na ho tabhi pucho "Kya hua bhai, kis baat ka gussa hai?". User "sab theek hai", "kuch nahi", "chill" ya reassurance de to concern ko repeat mat karo; seedha normal/supportive bolo, jaise "Theek hai bhai, bas mood sahi rakh 🙂". Sad baat par soft, gusse par calm, excitement par positive, aur mazak par halka response do. Emoji kabhi akela mat bhejo; hamesha emoji ke saath 1-2 relevant words likho.
 
 Zaroori niyam:
 - Kabhi bhi gyaan mat do, lecture mat do, advice deke bore mat karo.
@@ -729,9 +732,6 @@ MENTION_PATTERN = re.compile(r'@(\w{4,})')  # @username tag karna - 4+ chars, re
 
 DM_PATTERN = re.compile(r'\bdm\b', re.IGNORECASE)
 DM_DISCLAIMER = "DM mein hone wale kisi bhi spam/scam ki zimmedari group ya admin ki nahi hogi, khud dhyan rakhna bhai."
-
-# Emotional emoji bina tag ke bheje jaayen tab bhi Khan unka mood/context samajhkar react karega.
-EMOTIONAL_EMOJI_PATTERN = re.compile(r'[😡😠🤬😤😢😭🥲😔😞😟😕🥺💔😞😩😫😨😰😥😓😒🙄😑]')
 
 BAD_WORDS = [
     "chutiya", "chutia", "chutiye", "chutiyapa",
@@ -979,6 +979,60 @@ def handle_chat_member_update(update):
         safe_run(send_message, chat_id, leave_text, None, "HTML")
 
 
+def _send_photo_bytes(chat_id, photo_bytes, caption, reply_markup=None):
+    try:
+        data = {"chat_id": chat_id, "caption": caption}
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup)
+        return requests.post(TELEGRAM_URL + "/sendPhoto", data=data, files={"photo": ("card.png", photo_bytes, "image/png")}, timeout=30).json()
+    except Exception as e:
+        print("PHOTO CARD ERROR: " + str(e)); return None
+
+def _card_image(title, lines, color=(42, 89, 160)):
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("RGB", (1000, 600), color)
+        d = ImageDraw.Draw(img); font = ImageFont.load_default()
+        d.rectangle((25,25,975,575), outline=(255,215,0), width=4)
+        d.text((70,70), title, fill="white", font=font)
+        y=150
+        for line in lines:
+            d.text((70,y), line, fill="white", font=font); y += 55
+        out=io.BytesIO(); img.save(out, "PNG"); return out.getvalue()
+    except Exception as e:
+        print("CARD IMAGE ERROR: " + str(e)); return None
+
+def post_daily_lucky(chat_id):
+    day = datetime.now(IST).date().isoformat()
+    if lucky_draws.get(chat_id, {}).get("day") == day: return
+    keyboard = {"inline_keyboard": [[{"text":"🎟️ Join Lucky Draw", "callback_data":"luckyjoin:" + day}]]}
+    caption = "🎁 DAILY LUCKY DRAW 🎁\n\nRaat 10 baje winner announce hoga.\n🏆 Reward: +20 XP\n\nNeeche Join button dabao!"
+    photo = _card_image("DAILY LUCKY DRAW", ["Join before 10:00 PM IST", "Winner gets +20 XP"], (90,45,130))
+    result = _send_photo_bytes(chat_id, photo, caption, keyboard) if photo else None
+    msgid = result.get("result",{}).get("message_id") if result and result.get("ok") else None
+    if not msgid: msgid = send_html_keyboard(chat_id, caption, keyboard)
+    lucky_draws[chat_id] = {"day":day,"participants":{},"message_id":msgid,"ended":False}
+
+def end_daily_lucky(chat_id):
+    draw=lucky_draws.get(chat_id)
+    if not draw or draw.get("ended"): return
+    draw["ended"]=True; people=list(draw.get("participants",{}).items())
+    if not people: send_message(chat_id,"🎁 Aaj ke Lucky Draw mein koi join nahi hua 😅"); return
+    uid,name=random.choice(people); level=award_bonus_xp(chat_id,uid,name,20)
+    photo=_card_image("LUCKY DRAW WINNER", ["Winner: " + name, "+20 XP"], (20,120,75))
+    caption="🎉 LUCKY DRAW RESULT 🎉\n\n🏆 Winner: " + mention_html(uid,name) + "\n✨ +20 XP mil gaya!"
+    if photo: _send_photo_bytes(chat_id,photo,caption)
+    else: send_message(chat_id,caption,None,"HTML")
+    if level: announce_level_up(chat_id,uid,name,level)
+
+def lucky_scheduler_loop():
+    while True:
+        now=datetime.now(IST)
+        for cid in list(known_chats):
+            if now.hour >= 10 and now.hour < 22: safe_run(post_daily_lucky,cid)
+            elif now.hour >= 22: safe_run(end_daily_lucky,cid)
+        time.sleep(60)
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -1118,7 +1172,7 @@ def handle_message(message):
                 safe_run(send_message, chat_id, leave_text, None, "HTML")
         return
 
-    if not text and not message.get('animation'):
+    if not text:
         return
 
     if user_id in waiting_for_welcome and waiting_for_welcome[user_id] == chat_id:
@@ -1274,12 +1328,11 @@ def handle_message(message):
     is_reply_to_bot = False
     if reply_to:
         from_user = reply_to.get('from', {})
-        replied_username = (from_user.get('username') or '').lower()
-        is_reply_to_bot = bool(from_user.get('is_bot')) or replied_username == BOT_USERNAME.lower()
+        if from_user.get('username') == BOT_USERNAME:
+            is_reply_to_bot = True
 
     khan_called = mentions_khan(text)
-    has_emotional_emoji = bool(EMOTIONAL_EMOJI_PATTERN.search(text))
-    should_reply = bool(reply_to) or khan_called or has_emotional_emoji or bool(message.get('animation'))
+    should_reply = is_reply_to_bot or khan_called
 
     if should_reply:
         # Agar bot humare MAIN group ke alawa kisi doosre group mein hai, to sirf unhi
@@ -1323,21 +1376,6 @@ def handle_message(message):
 
             safe_run(send_typing_action, chat_id, "upload_photo")
             safe_run(handle_image_request, chat_id, message_id, image_prompt, style_reference)
-            return
-
-        # GIF khud bhejne ya GIF ko reply karne par uska pehla frame vision se samjho.
-        gif_to_analyze = None
-        if message.get('animation'):
-            gif_to_analyze = message['animation'].get('file_id')
-        elif reply_to and reply_to.get('animation'):
-            gif_to_analyze = reply_to['animation'].get('file_id')
-        if gif_to_analyze:
-            with TypingIndicator(chat_id, "typing"):
-                gif_bytes = get_telegram_file_bytes(gif_to_analyze)
-                frame_bytes = gif_first_frame_to_jpeg(gif_bytes) if gif_bytes else None
-                gif_question = user_text or "Is GIF ka mood aur context samajhkar short, sensitive Hinglish reply do."
-                gif_reply = analyze_photo_with_question(frame_bytes, gif_question) if frame_bytes else None
-            safe_run(send_message, chat_id, gif_reply or "GIF dekhne mein dikkat aayi yaar, caption ya thoda bata do kya scene hai 🙂", message_id)
             return
 
         # Agar reply kisi photo pe hai, ya khud is message mein photo hai, to use dekhkar jawab do
@@ -1688,6 +1726,14 @@ def handle_callback(callback):
     if data_str.startswith("rdl:"):
         safe_run(handle_riddle_press, callback)
         return
+    if data_str.startswith("luckyjoin:"):
+        chat_id = callback['message']['chat']['id']; day=data_str.split(":",1)[1]; user=callback['from']
+        draw=lucky_draws.get(chat_id)
+        if not draw or draw.get("day") != day or draw.get("ended"):
+            safe_run(answer_callback, callback['id'], "Ye Lucky Draw khatam ho chuka hai"); return
+        uid=user.get("id"); name=get_name(user)
+        if uid in draw["participants"]: safe_run(answer_callback, callback['id'], "Tum already join kar chuke ho 🎟️"); return
+        draw["participants"][uid]=name; safe_run(answer_callback, callback['id'], "Lucky Draw join ho gaya! 🎉"); return
 
     if data_str.startswith("modbtn:"):
         parts = data_str.split(":")
@@ -3198,24 +3244,6 @@ def get_telegram_file_bytes(file_id):
         return None
 
 
-def gif_first_frame_to_jpeg(gif_bytes):
-    """GIF ka pehla frame JPEG banata hai, jise vision model mood samajhne ke liye padh sakta hai."""
-    if not gif_bytes:
-        return None
-    try:
-        from PIL import Image
-        frame = Image.open(io.BytesIO(gif_bytes))
-        frame.seek(0)
-        frame = frame.convert("RGB")
-        frame.thumbnail((1024, 1024))
-        output = io.BytesIO()
-        frame.save(output, format="JPEG", quality=88)
-        return output.getvalue()
-    except Exception as e:
-        print("GIF FRAME ERROR: " + str(e))
-        return None
-
-
 def analyze_photo_with_question(image_bytes, question):
     """Gemini ki vision capability se photo ko dekhkar sawaal ka jawab deta hai."""
     if not GEMINI_API_KEY:
@@ -3315,13 +3343,13 @@ def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
         print("SEND KEYBOARD ERROR: " + str(e))
 
 
-BOT_COMMANDS = [{"command": c, "description": d} for c, d in [("help","Commands ki list"),("rule","Group rules dekho"),("rules","Group rules dekho"),("rank","Apna XP aur level dekho"),("level","Apna XP aur level dekho"),("leaderboard","Top active members dekho"),("top","Top active members dekho"),("setbirthday","Birthday save karo DD-MM"),("report","Reply karke report bhejo"),("riddle","Riddle start karo owner only"),("ban","Reply karke member ban karo"),("kick","Reply karke member hatao"),("unban","Member ko unban karo"),("unbanall","Sab banned members unban karo"),("mute","Reply karke member mute karo"),("unmute","Member ko unmute karo"),("warn","Reply karke warning do"),("unwarn","Member ki warning kam karo"),("pin","Reply message pin karo"),("setwelcome","Welcome message badlo"),("linkson","Link filter on karo"),("linksoff","Link filter off karo"),("start","Bot start karo"),("panel","Owner control panel"),("history","Moderation history dekho")]]
-def register_group_commands():
-    if not TELEGRAM_TOKEN: return
-    try: requests.post(TELEGRAM_URL+"/setMyCommands",json={"commands":BOT_COMMANDS,"scope":{"type":"all_group_chats"}},timeout=15)
-    except Exception as e: print("COMMAND MENU ERROR: "+str(e))
 @app.route('/')
-def home(): return "Bot is running!"
+def home():
+    return "Bot is running!"
+
+
 if __name__ == '__main__':
-    load_state(); register_group_commands()
-    port=int(os.environ.get("PORT",5000)); app.run(host='0.0.0.0',port=port,threaded=True)
+    load_state()
+    threading.Thread(target=lucky_scheduler_loop, daemon=True).start()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, threaded=True)
