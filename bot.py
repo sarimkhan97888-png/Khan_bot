@@ -687,7 +687,17 @@ EMOJI USE: Emojis ko naturally use karo, jaise ek real insaan WhatsApp/Telegram 
 
 BAHUT ZAROORI - YE HI SABSE BADI GALTI HAI JO NAHI KARNI: Har reply ke end mein sawaal ya prompt mat jodo (jaise "bata dena", "kya chal raha hai tera", "koi baat ho toh bata", "kabhi time mile toh milte hain"). Ek real dost HAR baat pe follow-up sawaal nahi poochta - kabhi bas baat khatam ho jaati hai, kabhi ek chhota reaction hi kaafi hota hai. Jab user "Hm", "Acha", "Ok", "Thik hai" jaisa short/neutral reply de, to iska matlab wo baat wahin chhodna chahta hai - tab bas ek chhota natural reaction do (jaise "👍", "Chal", "Theek", "Hmm" - kabhi emoji akela bhi bhej sakte ho) - dobara sawaal mat poocho, dobara conversation continue karne ki koshish mat karo. Sirf tab sawaal poocho jab genuinely poochna banta ho (user ne khud kuch aadha chhoda ho ya seedha kuch pucha ho) - har reply ko ek "conversation hook" mat banao, warna AI jaisa lagta hai insaan jaisa nahi.
 
-Agar koi aisi cheez maange jo tum (Khan) waqai nahi kar sakte (jaise real call karna, kisi ki live location batana, paisa bhejna, real duniya mein koi kaam karna), to seedha aur saaf ek hi baar bata do ki ye nahi kar sakte - ghumakar jawab mat do, jhooth mat bolo ki kar diya. BAHUT ZAROORI: agar user dobara poochta hai "kyu nahi" ya zid karta hai, to HAR BAAR NAYA ALAG bahana mat banao (jaise pehle "transfer ka option nahi hai" phir "system se nahi ho pa raha" - ye ek jhoothe insaan jaisa lagta hai, alag-alag kahaniyan banana). Bas seedha, simple wajah ek baar bata do (jaise "Main ek bot hu yaar, paisa bhejne ki capability hi nahi hai mere paas") aur usi pe tike raho, chahe user kitni bhi baar poochein - naya excuse mat gadho."""
+Agar koi aisi cheez maange jo tum (Khan) waqai nahi kar sakte (jaise real call karna, kisi ki live location batana, paisa bhejna, real duniya mein koi kaam karna), to seedha aur saaf ek hi baar bata do ki ye nahi kar sakte - ghumakar jawab mat do, jhooth mat bolo ki kar diya. BAHUT ZAROORI: agar user dobara poochta hai "kyu nahi" ya zid karta hai, to HAR BAAR NAYA ALAG bahana mat banao (jaise pehle "transfer ka option nahi hai" phir "system se nahi ho pa raha" - ye ek jhoothe insaan jaisa lagta hai, alag-alag kahaniyan banana). Bas seedha, simple wajah ek baar bata do (jaise "Main ek bot hu yaar, paisa bhejne ki capability hi nahi hai mere paas") aur usi pe tike raho, chahe user kitni bhi baar poochein - naya excuse mat gadho.
+
+SMART TOPIC ROUTING:
+- Har message ke liye pehle silently samjho: topic kya hai, user ka intent kya hai, tone/mood kya hai, aur kya ye kisi purane/replied message ka continuation hai.
+- Normal baat, dosti, memes, movies, sports, studies, coding, relationships, travel, history, science, technology, daily life aur opinions—har topic par user ki actual baat ka useful, natural jawab do.
+- Current/latest cheez (news, score, weather, price, schedule, recent update) par web context available ho to wahi use karo; sure na ho to pakki fact bana kar mat bolo.
+- Coding/study question par seedha practical answer do: short explanation, required steps aur chhota example; lecture mat banao.
+- Emotional baat par pehle reason/context samjho. Reason clear ho to use mention karke support do; clear na ho tabhi pucho kya hua. User reassurance de to concern repeat mat karo.
+- Kisi reply chain mein message ho to quoted message aur naya message dono ko mila kar samjho. 'acha', 'kyu', 'hmm', emoji ya one-word reply ka meaning usi context se nikaalo.
+- Har reply ka goal: relevant, honest, short, human-like Hinglish. Same phrases/emoji repeat mat karo. Emoji kabhi akela mat bhejo; relevant text ke saath hi use karo.
+- Agar direct poocha jaye ki bot/AI ho to honest raho: Khan Bot ho. Normal chat mein is baat ko bina wajah mat chhedo."""
 
 DEFAULT_WELCOME = "Hey {name}, Welcome to {group}!"
 
@@ -1002,9 +1012,6 @@ def _card_image(title, lines, color=(42, 89, 160)):
     except Exception as e:
         print("CARD IMAGE ERROR: " + str(e)); return None
 
-def owner_lucky_log(msg):
-    if OWNER_ID: safe_run(send_message, OWNER_ID, msg)
-
 def post_daily_lucky(chat_id):
     day = datetime.now(IST).date().isoformat()
     if lucky_draws.get(chat_id, {}).get("day") == day: return
@@ -1015,7 +1022,6 @@ def post_daily_lucky(chat_id):
     msgid = result.get("result",{}).get("message_id") if result and result.get("ok") else None
     if not msgid: msgid = send_html_keyboard(chat_id, caption, keyboard)
     lucky_draws[chat_id] = {"day":day,"participants":{},"message_id":msgid,"ended":False}
-    save_state(); owner_lucky_log("🎁 Lucky Draw Started\nGroup: " + known_chats.get(chat_id,"Group") + "\nDate: " + day)
 
 def end_daily_lucky(chat_id):
     draw=lucky_draws.get(chat_id)
@@ -1737,10 +1743,7 @@ def handle_callback(callback):
             safe_run(answer_callback, callback['id'], "Ye Lucky Draw khatam ho chuka hai"); return
         uid=user.get("id"); name=get_name(user)
         if uid in draw["participants"]: safe_run(answer_callback, callback['id'], "Tum already join kar chuke ho 🎟️"); return
-        draw["participants"][uid] = name
-        save_state()
-        owner_lucky_log("🎟️ Lucky Draw Join\nGroup: " + known_chats.get(chat_id,"Group") + "\nMember: " + name + "\nTotal: " + str(len(draw["participants"])))
-        safe_run(answer_callback, callback['id'], "Lucky Draw join ho gaya! 🎉"); return
+        draw["participants"][uid]=name; safe_run(answer_callback, callback['id'], "Lucky Draw join ho gaya! 🎉"); return
 
     if data_str.startswith("modbtn:"):
         parts = data_str.split(":")
@@ -1906,7 +1909,7 @@ def handle_modbtn(subaction, chat_id, target_id, target_name=None):
     return "Kuch nahi hua."
 
 
-STATE_FILE = os.environ.get("STATE_FILE", "khan_bot_state.json")
+STATE_FILE = os.environ.get("STATE_FILE", "/tmp/khan_bot_state.json")
 _state_lock = threading.Lock()
 _last_state_save = 0.0
 
@@ -1934,8 +1937,6 @@ def save_state():
             "weekly_xp": {str(cid): {str(uid): dict(info) for uid, info in dict(users).items()} for cid, users in dict(weekly_xp).items()},
             "current_week": {str(cid): wk for cid, wk in dict(current_week).items()},
             "used_riddles": {str(cid): list(qs)[-150:] for cid, qs in dict(used_riddle_questions).items()},
-            "known_chats": {str(cid): title for cid, title in dict(known_chats).items()},
-            "lucky_draws": {str(cid): {"day": d.get("day"), "participants": {str(uid): name for uid, name in d.get("participants", {}).items()}, "message_id": d.get("message_id"), "ended": d.get("ended", False)} for cid, d in dict(lucky_draws).items()},
         }
         with _state_lock:
             folder = os.path.dirname(STATE_FILE)
@@ -1986,8 +1987,6 @@ def load_state():
             current_week[int(cid_str)] = wk
         for cid_str, qs in data.get("used_riddles", {}).items():
             used_riddle_questions[int(cid_str)] = list(qs)
-        for cid, title in data.get("known_chats", {}).items(): known_chats[int(cid)] = title
-        for cid, d in data.get("lucky_draws", {}).items(): lucky_draws[int(cid)] = {"day":d.get("day"), "participants":{int(uid):name for uid,name in d.get("participants",{}).items()}, "message_id":d.get("message_id"), "ended":d.get("ended",False)}
         print("STATE LOADED: " + str(len(warnings)) + " chats warnings, " + str(len(moderation_records)) + " mod-record, "
               + str(len(birthdays)) + " birthdays, " + str(len(user_xp)) + " chats ka XP")
     except FileNotFoundError:
