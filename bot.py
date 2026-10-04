@@ -636,14 +636,10 @@ def handle_riddle_press(callback):
                 "🏆 Winners:\n" + "\n".join(_riddle_winners_lines(riddle)))
         edit_message_html(chat_id, riddle["message_id"], text)
     else:
-        reward_lines = "\n".join(RIDDLE_MEDALS[i] + " " + str(i + 1) + ") +" + str(RIDDLE_WIN_XP[i]) + " XP" for i in range(RIDDLE_MAX_WINNERS))
-        slots_left = RIDDLE_MAX_WINNERS - len(riddle["winners"])
-        text = (riddle_header("RIDDLE TIME") +
-                "❓ <b>" + escape_html(riddle["question"]) + "</b>\n\n"
-                "🎁 Inaam:\n" + reward_lines + "\n\n"
-                "🏆 Ab tak:\n" + "\n".join(_riddle_winners_lines(riddle)) + "\n\n"
-                "⏳ " + str(slots_left) + " jagah baaki hai - baaki log bhi try karo!")
-        edit_message_html(chat_id, riddle["message_id"], text)
+        # 1st aur 2nd winner ke baad original riddle message ko bilkul edit nahi karna.
+        # Telegram editMessageText inline option buttons hata deta hai.
+        # Answer callback already winner ko result dikha deta hai; buttons baaki members ke liye visible rahenge.
+        pass
 
     if new_level:
         announce_level_up(chat_id, uid, name, new_level)
@@ -687,17 +683,7 @@ EMOJI USE: Emojis ko naturally use karo, jaise ek real insaan WhatsApp/Telegram 
 
 BAHUT ZAROORI - YE HI SABSE BADI GALTI HAI JO NAHI KARNI: Har reply ke end mein sawaal ya prompt mat jodo (jaise "bata dena", "kya chal raha hai tera", "koi baat ho toh bata", "kabhi time mile toh milte hain"). Ek real dost HAR baat pe follow-up sawaal nahi poochta - kabhi bas baat khatam ho jaati hai, kabhi ek chhota reaction hi kaafi hota hai. Jab user "Hm", "Acha", "Ok", "Thik hai" jaisa short/neutral reply de, to iska matlab wo baat wahin chhodna chahta hai - tab bas ek chhota natural reaction do (jaise "👍", "Chal", "Theek", "Hmm" - kabhi emoji akela bhi bhej sakte ho) - dobara sawaal mat poocho, dobara conversation continue karne ki koshish mat karo. Sirf tab sawaal poocho jab genuinely poochna banta ho (user ne khud kuch aadha chhoda ho ya seedha kuch pucha ho) - har reply ko ek "conversation hook" mat banao, warna AI jaisa lagta hai insaan jaisa nahi.
 
-Agar koi aisi cheez maange jo tum (Khan) waqai nahi kar sakte (jaise real call karna, kisi ki live location batana, paisa bhejna, real duniya mein koi kaam karna), to seedha aur saaf ek hi baar bata do ki ye nahi kar sakte - ghumakar jawab mat do, jhooth mat bolo ki kar diya. BAHUT ZAROORI: agar user dobara poochta hai "kyu nahi" ya zid karta hai, to HAR BAAR NAYA ALAG bahana mat banao (jaise pehle "transfer ka option nahi hai" phir "system se nahi ho pa raha" - ye ek jhoothe insaan jaisa lagta hai, alag-alag kahaniyan banana). Bas seedha, simple wajah ek baar bata do (jaise "Main ek bot hu yaar, paisa bhejne ki capability hi nahi hai mere paas") aur usi pe tike raho, chahe user kitni bhi baar poochein - naya excuse mat gadho.
-
-SMART TOPIC ROUTING:
-- Har message ke liye pehle silently samjho: topic kya hai, user ka intent kya hai, tone/mood kya hai, aur kya ye kisi purane/replied message ka continuation hai.
-- Normal baat, dosti, memes, movies, sports, studies, coding, relationships, travel, history, science, technology, daily life aur opinions—har topic par user ki actual baat ka useful, natural jawab do.
-- Current/latest cheez (news, score, weather, price, schedule, recent update) par web context available ho to wahi use karo; sure na ho to pakki fact bana kar mat bolo.
-- Coding/study question par seedha practical answer do: short explanation, required steps aur chhota example; lecture mat banao.
-- Emotional baat par pehle reason/context samjho. Reason clear ho to use mention karke support do; clear na ho tabhi pucho kya hua. User reassurance de to concern repeat mat karo.
-- Kisi reply chain mein message ho to quoted message aur naya message dono ko mila kar samjho. 'acha', 'kyu', 'hmm', emoji ya one-word reply ka meaning usi context se nikaalo.
-- Har reply ka goal: relevant, honest, short, human-like Hinglish. Same phrases/emoji repeat mat karo. Emoji kabhi akela mat bhejo; relevant text ke saath hi use karo.
-- Agar direct poocha jaye ki bot/AI ho to honest raho: Khan Bot ho. Normal chat mein is baat ko bina wajah mat chhedo."""
+Agar koi aisi cheez maange jo tum (Khan) waqai nahi kar sakte (jaise real call karna, kisi ki live location batana, paisa bhejna, real duniya mein koi kaam karna), to seedha aur saaf ek hi baar bata do ki ye nahi kar sakte - ghumakar jawab mat do, jhooth mat bolo ki kar diya. BAHUT ZAROORI: agar user dobara poochta hai "kyu nahi" ya zid karta hai, to HAR BAAR NAYA ALAG bahana mat banao (jaise pehle "transfer ka option nahi hai" phir "system se nahi ho pa raha" - ye ek jhoothe insaan jaisa lagta hai, alag-alag kahaniyan banana). Bas seedha, simple wajah ek baar bata do (jaise "Main ek bot hu yaar, paisa bhejne ki capability hi nahi hai mere paas") aur usi pe tike raho, chahe user kitni bhi baar poochein - naya excuse mat gadho."""
 
 DEFAULT_WELCOME = "Hey {name}, Welcome to {group}!"
 
