@@ -296,9 +296,6 @@ def handle_rank(chat_id, user_id, name):
     else:
         lines.append("🌟 Tum sabse upar ke level pe ho!")
     lines.append("🏆 Group rank: <b>#" + str(position) + "</b> / " + str(len(ranking)))
-    card = render_rank_card(name, level, xp, pct, position, len(ranking))
-    if card and _send_photo_bytes(chat_id, card, "🏅 " + name + " • " + level + "\n✨ " + fmt_xp(xp) + " XP"):
-        return
     send_message(chat_id, "\n".join(lines), None, "HTML")
 
 
@@ -994,8 +991,7 @@ def _send_photo_bytes(chat_id, photo_bytes, caption, reply_markup=None):
 def _card_image(title, lines, color=(42, 89, 160)):
     try:
         from PIL import Image, ImageDraw, ImageFont
-        asset="lucky_winner.png" if "WINNER" in title else "lucky_start.png"
-        img=Image.open(os.path.join(os.path.dirname(__file__),"assets",asset)).convert("RGB") if os.path.exists(os.path.join(os.path.dirname(__file__),"assets",asset)) else Image.new("RGB",(1000,600),color)
+        img = Image.new("RGB", (1000, 600), color)
         d = ImageDraw.Draw(img); font = ImageFont.load_default()
         d.rectangle((25,25,975,575), outline=(255,215,0), width=4)
         d.text((70,70), title, fill="white", font=font)
@@ -1006,16 +1002,8 @@ def _card_image(title, lines, color=(42, 89, 160)):
     except Exception as e:
         print("CARD IMAGE ERROR: " + str(e)); return None
 
-def render_rank_card(name, level, xp, pct, position, total):
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        key=re.sub(r"[^a-z]","",level.lower()); img=Image.open(os.path.join(os.path.dirname(__file__),"assets",key+".png")).convert("RGB")
-        d=ImageDraw.Draw(img); f=ImageFont.load_default(); d.rounded_rectangle((70,80,1130,640),25,fill=(0,0,0,150),outline="white",width=3)
-        y=125
-        for s in ["KHAN RANK CARD",name,level,"XP: "+fmt_xp(xp),"Group Rank: #"+str(position)+" / "+str(total)]: d.text((120,y),s,fill="white",font=f);y+=75
-        d.rounded_rectangle((120,530,1080,570),15,outline="white",width=3);d.rounded_rectangle((124,534,124+int(952*pct/100),566),12,fill=(255,215,0))
-        o=io.BytesIO();img.save(o,"PNG");return o.getvalue()
-    except Exception as e: print("RANK CARD ERROR: "+str(e));return None
+def owner_lucky_log(msg):
+    if OWNER_ID: safe_run(send_message, OWNER_ID, msg)
 
 def post_daily_lucky(chat_id):
     day = datetime.now(IST).date().isoformat()
@@ -1027,6 +1015,7 @@ def post_daily_lucky(chat_id):
     msgid = result.get("result",{}).get("message_id") if result and result.get("ok") else None
     if not msgid: msgid = send_html_keyboard(chat_id, caption, keyboard)
     lucky_draws[chat_id] = {"day":day,"participants":{},"message_id":msgid,"ended":False}
+    save_state(); owner_lucky_log("🎁 Lucky Draw Started\nGroup: " + known_chats.get(chat_id,"Group") + "\nDate: " + day)
 
 def end_daily_lucky(chat_id):
     draw=lucky_draws.get(chat_id)
@@ -1748,7 +1737,10 @@ def handle_callback(callback):
             safe_run(answer_callback, callback['id'], "Ye Lucky Draw khatam ho chuka hai"); return
         uid=user.get("id"); name=get_name(user)
         if uid in draw["participants"]: safe_run(answer_callback, callback['id'], "Tum already join kar chuke ho 🎟️"); return
-        draw["participants"][uid]=name; safe_run(answer_callback, callback['id'], "Lucky Draw join ho gaya! 🎉"); return
+        draw["participants"][uid] = name
+        save_state()
+        owner_lucky_log("🎟️ Lucky Draw Join\nGroup: " + known_chats.get(chat_id,"Group") + "\nMember: " + name + "\nTotal: " + str(len(draw["participants"])))
+        safe_run(answer_callback, callback['id'], "Lucky Draw join ho gaya! 🎉"); return
 
     if data_str.startswith("modbtn:"):
         parts = data_str.split(":")
@@ -1914,7 +1906,7 @@ def handle_modbtn(subaction, chat_id, target_id, target_name=None):
     return "Kuch nahi hua."
 
 
-STATE_FILE = os.environ.get("STATE_FILE", "/tmp/khan_bot_state.json")
+STATE_FILE = os.environ.get("STATE_FILE", "khan_bot_state.json")
 _state_lock = threading.Lock()
 _last_state_save = 0.0
 
@@ -1942,6 +1934,8 @@ def save_state():
             "weekly_xp": {str(cid): {str(uid): dict(info) for uid, info in dict(users).items()} for cid, users in dict(weekly_xp).items()},
             "current_week": {str(cid): wk for cid, wk in dict(current_week).items()},
             "used_riddles": {str(cid): list(qs)[-150:] for cid, qs in dict(used_riddle_questions).items()},
+            "known_chats": {str(cid): title for cid, title in dict(known_chats).items()},
+            "lucky_draws": {str(cid): {"day": d.get("day"), "participants": {str(uid): name for uid, name in d.get("participants", {}).items()}, "message_id": d.get("message_id"), "ended": d.get("ended", False)} for cid, d in dict(lucky_draws).items()},
         }
         with _state_lock:
             folder = os.path.dirname(STATE_FILE)
@@ -1992,6 +1986,8 @@ def load_state():
             current_week[int(cid_str)] = wk
         for cid_str, qs in data.get("used_riddles", {}).items():
             used_riddle_questions[int(cid_str)] = list(qs)
+        for cid, title in data.get("known_chats", {}).items(): known_chats[int(cid)] = title
+        for cid, d in data.get("lucky_draws", {}).items(): lucky_draws[int(cid)] = {"day":d.get("day"), "participants":{int(uid):name for uid,name in d.get("participants",{}).items()}, "message_id":d.get("message_id"), "ended":d.get("ended",False)}
         print("STATE LOADED: " + str(len(warnings)) + " chats warnings, " + str(len(moderation_records)) + " mod-record, "
               + str(len(birthdays)) + " birthdays, " + str(len(user_xp)) + " chats ka XP")
     except FileNotFoundError:
