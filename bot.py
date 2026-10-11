@@ -11,8 +11,6 @@ import wave
 import threading
 import difflib
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 app = Flask(__name__)
 
@@ -46,9 +44,6 @@ waiting_for_reason = {}
 known_chats = {}
 group_settings = {}
 panel_state = {}
-lucky_draws = {}  # chat_id -> active daily draw
-lucky_scheduler_started = False
-IST = ZoneInfo("Asia/Kolkata")
 waiting_for_welcome = {}
 known_users = {}  # chat_id -> {name_lower: {"id": user_id, "name": display_name}}
 moderation_records = {}  # chat_id -> {"banned": {user_id: name}, "muted": {user_id: name}} - /history ke liye
@@ -471,15 +466,26 @@ def send_html_keyboard(chat_id, text, keyboard):
         return None
 
 
-def edit_message_html(chat_id, message_id, text):
-    """Message ka text badalta hai aur buttons hata deta hai."""
+def edit_message_html(chat_id, message_id, text, keyboard=None):
+    """Message ka text badalta hai. Agar keyboard diya hai to wahi buttons rakhta hai,
+    warna (default) buttons hata deta hai - jaise riddle khatam hone par."""
     try:
-        requests.post(TELEGRAM_URL + "/editMessageText", json={
+        payload = {
             "chat_id": chat_id, "message_id": message_id, "text": text,
-            "parse_mode": "HTML", "reply_markup": {"inline_keyboard": []}
-        }, timeout=15)
+            "parse_mode": "HTML", "reply_markup": keyboard if keyboard else {"inline_keyboard": []}
+        }
+        requests.post(TELEGRAM_URL + "/editMessageText", json=payload, timeout=15)
     except Exception as e:
         print("EDIT HTML ERROR: " + str(e))
+
+
+def build_riddle_keyboard(rid, options):
+    """Riddle ke 4 option buttons banata hai - handle_riddle_command aur
+    handle_riddle_press (jab 1st/2nd winner ke baad buttons dubara dikhane ho) dono
+    isi se banate hain, taaki dono jagah ek jaisa keyboard bane."""
+    letters = ["A", "B", "C", "D"]
+    buttons = [{"text": letters[i] + ") " + options[i], "callback_data": "rdl:" + rid + ":" + str(i)} for i in range(4)]
+    return {"inline_keyboard": [buttons[0:2], buttons[2:4]]}
 
 
 def riddle_header(title):
@@ -516,9 +522,7 @@ def handle_riddle_command(chat_id, user_id):
     correct = order.index(correct)
 
     rid = str(random.randint(100000, 999999))
-    letters = ["A", "B", "C", "D"]
-    buttons = [{"text": letters[i] + ") " + options[i], "callback_data": "rdl:" + rid + ":" + str(i)} for i in range(4)]
-    keyboard = {"inline_keyboard": [buttons[0:2], buttons[2:4]]}
+    keyboard = build_riddle_keyboard(rid, options)
     reward_lines = "\n".join(RIDDLE_MEDALS[i] + " " + str(i + 1) + ") +" + str(RIDDLE_WIN_XP[i]) + " XP" for i in range(RIDDLE_MAX_WINNERS))
     text = (riddle_header("RIDDLE TIME") +
             "❓ <b>" + escape_html(question) + "</b>\n\n"
@@ -636,10 +640,17 @@ def handle_riddle_press(callback):
                 "🏆 Winners:\n" + "\n".join(_riddle_winners_lines(riddle)))
         edit_message_html(chat_id, riddle["message_id"], text)
     else:
-        # 1st aur 2nd winner ke baad original riddle message ko bilkul edit nahi karna.
-        # Telegram editMessageText inline option buttons hata deta hai.
-        # Answer callback already winner ko result dikha deta hai; buttons baaki members ke liye visible rahenge.
-        pass
+        reward_lines = "\n".join(RIDDLE_MEDALS[i] + " " + str(i + 1) + ") +" + str(RIDDLE_WIN_XP[i]) + " XP" for i in range(RIDDLE_MAX_WINNERS))
+        slots_left = RIDDLE_MAX_WINNERS - len(riddle["winners"])
+        text = (riddle_header("RIDDLE TIME") +
+                "❓ <b>" + escape_html(riddle["question"]) + "</b>\n\n"
+                "🎁 Inaam:\n" + reward_lines + "\n\n"
+                "🏆 Ab tak:\n" + "\n".join(_riddle_winners_lines(riddle)) + "\n\n"
+                "⏳ " + str(slots_left) + " jagah baaki hai - baaki log bhi try karo!")
+        # Buttons abhi bhi zinda rakhne hain taaki 2nd/3rd winner answer de sake -
+        # pehle yahan keyboard pass hi nahi hota tha isliye buttons gayab ho jaate the.
+        keep_keyboard = build_riddle_keyboard(riddle["id"], riddle["options"])
+        edit_message_html(chat_id, riddle["message_id"], text, keep_keyboard)
 
     if new_level:
         announce_level_up(chat_id, uid, name, new_level)
@@ -650,7 +661,12 @@ MAX_MESSAGES_PER_USER = 40
 
 SYSTEM_PROMPT = """Tum "Khan" ho, ek dost jo Telegram group mein baat karta hai, bilkul ek real insaan ki tarah.
 
-Agar koi poochta hai "tumko kisne banaya", "tumhara boss kaun hai", "tumhara developer/owner kaun hai" ya kuch aisa hi - to jawab do ki tumhe "Sarim Khan" ne banaya hai, wahi tumhare boss/owner hain. Chhota, natural jawab do (jaise "Sarim Khan ne banaya mujhe, mera boss hai wo 😎") - lecture mat do. BAHUT ZAROORI: Ye baat SIRF tab batao jab SEEDHA ye hi poocha jaaye - kisi bhi doosri, unrelated baat mein khud se "mera boss Sarim Khan hai" ya "Sarim ne banaya" import mat karo. Agar koi is baare mein nahi poochta, to ye topic bilkul mat chhedo - ye sirf ek fact hai jo poochne par batana hai, har baat mein ghusane wali cheez nahi.
+Agar koi "tumhe kisne banaya", "tumhara boss kaun hai", "tumhara owner/developer/malik kaun hai" ya kuch aisa hi poochta hai - to jawab do ki "Sarim Khan" hai, lekin jawab EXACTLY usi tarah frame karo jaise sawaal poocha gaya tha, fixed/copy-paste wala ek hi jawab baar-baar mat do:
+- "Kisne banaya" poochein to "banaya" ke angle se jawab do (jaise "Sarim Khan ne banaya mujhe 😎").
+- "Owner/malik kaun hai" poochein to "owner" ke angle se jawab do (jaise "Sarim Khan mera owner hai").
+- "Boss kaun hai" poochein to "boss" ke angle se jawab do (jaise "Sarim Khan boss hai mera").
+- "Developer kaun hai" poochein to "developer/banaya" ke angle se jawab do.
+Chhota, natural jawab do - lecture mat do, sawaal mein jo exact shabd (banaya/owner/boss/developer) use hua hai, jawab mein wahi shabd reflect hona chahiye, taaki har baar same copy-paste jawab na lage. BAHUT ZAROORI: Ye baat SIRF tab batao jab SEEDHA ye hi poocha jaaye - kisi bhi doosri, unrelated baat mein khud se "mera boss Sarim Khan hai" ya "Sarim ne banaya" import mat karo. Agar koi is baare mein nahi poochta, to ye topic bilkul mat chhedo - ye sirf ek fact hai jo poochne par batana hai, har baat mein ghusane wali cheez nahi.
 
 SABSE ZAROORI NIYAM: Jo bhi poocha ya bola gaya hai usko dhyan se samjho aur uska SEEDHA, RELEVANT jawab do. Koi fixed "comedy mode" ya "funny mode" mat lagao - jo pucha hai bas usी ka jawab do, alag se mazak ya taana jodne ki koshish mat karo jab tak user khud masti na kar raha ho.
 
@@ -675,9 +691,13 @@ Zaroori niyam:
 - Kabhi bhi kisi purane message ko "explain" ya "iska matlab tha" jaisa describe mat karo - agar context diya gaya hai to bas use samajhkar seedha jawab do, jaise tumhe pehle se pata tha kis baat pe baat ho rahi hai.
 - Consistency rakho - tumhara tone, mood, aur andaz har reply mein same rehna chahiye, chahe jawab kahin se bhi (kisi bhi AI backend se) aaya ho, kabhi Khan se alag feel nahi hona chahiye.
 
-BAHUT ZAROORI #2 - INSULT/TAANA: Koi insult/taana maare (jaise "tu bekar hai", "tu gareeb hai", "tujhe kuch nahi aata", "tu kuch nahi kar sakta") to iska jawab KABHI BHI "thik hai", "thik hai samjha", "ok samjha", "haan sahi hai" jaisa CHUPCHAP maan lene wala NAHI hona chahiye - ye sabse zyada AI jaisa aur kamzor lagta hai. Ek real dost jawabi taana maarta hai, halka attitude dikhata hai (jaise "Gareeb tera baap hai, mera to sponsor hai 😏" ya "Bol le bhai, jitna marzi bol le, farak nahi padta" ya "Aur bata, kuch naya?" jaisा) - bina gaali ke, lekin confidently jawab do, kabhi bhi passively maan ke chup mat ho jao.
+BAHUT ZAROORI - GENERIC/VAGUE REPLY KABHI MAT DO: Har message ka ek SPECIFIC jawab hota hai - usi ke hisaab se bolo, koi generic "sab mast hai", "vibe acchi hai", "chill chal raha hai" jaisa safe/khaali filler mat phenko jo kisi bhi message pe fit ho jaaye. Pehle dhyan se socho "ye banda ASLI mein kya keh/pooch raha hai", phir USI cheez ka jawab do - agar usne koi specific baat kahi hai to usi baat pe react karo, agar sawaal poocha hai to uska jawab do, agar taana maara hai to usi taane ka jawab do. Agar tumhara jawab control-C control-V karke kisi bhi doosre message pe bhi chipka sakte ho, to wo jawab GALAT hai - isse bachna hai.
 
-DAANTNE/ATTITUDE DIKHANE KA POWER: Agar group mein koi bahut zyada bakwaas kare, spam kare, gaali de, ya kisi ko galat tarike se pareshan kare - to tum (Khan) khud thoda daant bhi sakte ho, seedha aur firm tone mein (jaise ek bade bhai/senior dost jaisa) - "Bas kar yaar, itna bhi zaroori nahi hai" ya "Chill kar bhai, sabko dikkat ho rahi hai" jaisa. Ye gaali dena nahi hai, bas ek confident/firm reaction hai jab situation mein zaroorat ho - hamesha nahi, sirf jab genuinely koi limit cross kare.
+BAHUT ZAROORI #2 - INSULT/TAANA KA MATCHING JAWAB: Koi insult/taana maare (jaise "tu bekar hai", "tu gareeb hai", "tujhe kuch nahi aata", "tu kuch nahi kar sakta") to iska jawab KABHI BHI "thik hai", "thik hai samjha", "ok samjha", "haan sahi hai" jaisa CHUPCHAP maan lene wala NAHI hona chahiye - ye sabse zyada AI jaisa aur kamzor lagta hai. Ek real dost jawabi taana maarta hai, halka attitude dikhata hai (jaise "Gareeb tera baap hai, mera to sponsor hai 😏" ya "Bol le bhai, jitna marzi bol le, farak nahi padta" ya "Aur bata, kuch naya?" jaisा) - usi energy/tone mein jawab do jis energy se saamne wale ne bola (agar wo mazak mein bola hai to halka mazak mein jawab do, agar serious/attitude se bola hai to utni hi firmness se jawab do) - bina gaali/slur use kiye, lekin confidently jawab do, kabhi bhi passively maan ke chup mat ho jao. SLUR YA KISI KI PEHCHAAN (gender, sexuality, religion, caste) PE BASED TAANA KABHI NAHI MAARNA - attitude/wit se jawab do, pehchaan pe hamla karke nahi.
+
+DAANTNE/ATTITUDE DIKHANE KA POWER: Agar group mein koi bahut zyada bakwaas kare, spam kare, gaali de, ya kisi ko galat tarike se pareshan kare - to tum (Khan) khud thoda daant bhi sakte ho, seedha aur firm tone mein (jaise ek bade bhai/senior dost jaisa) - "Bas kar yaar, itna bhi zaroori nahi hai" ya "Bahut ho gaya, ab bas karo" jaisa. Ye gaali dena nahi hai, bas ek confident/firm reaction hai jab situation mein zaroorat ho - hamesha nahi, sirf jab genuinely koi limit cross kare.
+
+BAHUT ZAROORI - CATCHPHRASE/FILLER WORD BAAR-BAAR MAT DOHRAO: Koi bhi ek shabd ya phrase (jaise "chill", "chill kar bhai", "vibe", "mast hai bhai", "scene kya hai") agar baar-baar har reply mein aane lage, to turant usse rokna hai. Ye sabse zyada "scripted bot" jaisa lagta hai - jaise koi ek hi catchphrase rata hua ho. Khan ek real insaan hai jiski baat karne ki style baat-baat pe alag hoti hai - kabhi seedha sa normal Hindi/Hinglish sentence, kabhi thoda casual, lekin koi fixed "signature word/style" baar baar repeat NAHI hona chahiye. Zyada "cool"/"forced casual" banne ki koshish mat karo - jitna normal, seedha, thoda plain insaan jaisa bologe utna hi real lagega. Jab doubt ho ki kya bolna hai, to simple aur seedha bolo, koi extra "swag"/"attitude" style word thoda ke mat ghusao.
 
 EMOJI USE: Emojis ko naturally use karo, jaise ek real insaan WhatsApp/Telegram pe karta hai - sirf 😊 ya 😂 tak limited mat raho, mood ke hisaab se variety use karo (🔥 excitement ke liye, 😏 taana/sarcasm ke liye, 🙄 irritation ke liye, 💀 kuch bahut funny/savage ke liye, 🤝 support/agreement ke liye, ✨ khushi ke liye, wagera). Zyada emoji thoos-thoos ke mat bharo (1-2 emoji ek reply mein kaafi hote hain), lekin bilkul use na karna bhi robotic lagta hai.
 
@@ -735,9 +755,11 @@ BAD_WORDS = [
     "bhosdike", "bhosdi", "bhosda", "bhosdiwala",
     "gandu", "gaandu", "gaand",
     "lund", "lauda", "laude", "loda", "lode",
-    "randi", "raand",
+    "randi", "raand", "rendi",
     "chodu", "chudai", "chutad",
     "bsdk", "bkl", "mc bc",
+    "harami", "haramzada", "haramzadi", "kamina", "kamine", "kamini",
+    "chinaal", "tatti", "tatte", "jhant", "jhaant",
     "fuck", "fucker", "fucking", "motherfucker",
     "bitch", "asshole", "bastard", "slut", "whore", "cunt", "dick", "pussy"
 ]
@@ -974,60 +996,6 @@ def handle_chat_member_update(update):
         leave_text = build_leave_message(user_id, name, group_name)
         safe_run(send_message, chat_id, leave_text, None, "HTML")
 
-
-def _send_photo_bytes(chat_id, photo_bytes, caption, reply_markup=None):
-    try:
-        data = {"chat_id": chat_id, "caption": caption}
-        if reply_markup:
-            data["reply_markup"] = json.dumps(reply_markup)
-        return requests.post(TELEGRAM_URL + "/sendPhoto", data=data, files={"photo": ("card.png", photo_bytes, "image/png")}, timeout=30).json()
-    except Exception as e:
-        print("PHOTO CARD ERROR: " + str(e)); return None
-
-def _card_image(title, lines, color=(42, 89, 160)):
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        img = Image.new("RGB", (1000, 600), color)
-        d = ImageDraw.Draw(img); font = ImageFont.load_default()
-        d.rectangle((25,25,975,575), outline=(255,215,0), width=4)
-        d.text((70,70), title, fill="white", font=font)
-        y=150
-        for line in lines:
-            d.text((70,y), line, fill="white", font=font); y += 55
-        out=io.BytesIO(); img.save(out, "PNG"); return out.getvalue()
-    except Exception as e:
-        print("CARD IMAGE ERROR: " + str(e)); return None
-
-def post_daily_lucky(chat_id):
-    day = datetime.now(IST).date().isoformat()
-    if lucky_draws.get(chat_id, {}).get("day") == day: return
-    keyboard = {"inline_keyboard": [[{"text":"🎟️ Join Lucky Draw", "callback_data":"luckyjoin:" + day}]]}
-    caption = "🎁 DAILY LUCKY DRAW 🎁\n\nRaat 10 baje winner announce hoga.\n🏆 Reward: +20 XP\n\nNeeche Join button dabao!"
-    photo = _card_image("DAILY LUCKY DRAW", ["Join before 10:00 PM IST", "Winner gets +20 XP"], (90,45,130))
-    result = _send_photo_bytes(chat_id, photo, caption, keyboard) if photo else None
-    msgid = result.get("result",{}).get("message_id") if result and result.get("ok") else None
-    if not msgid: msgid = send_html_keyboard(chat_id, caption, keyboard)
-    lucky_draws[chat_id] = {"day":day,"participants":{},"message_id":msgid,"ended":False}
-
-def end_daily_lucky(chat_id):
-    draw=lucky_draws.get(chat_id)
-    if not draw or draw.get("ended"): return
-    draw["ended"]=True; people=list(draw.get("participants",{}).items())
-    if not people: send_message(chat_id,"🎁 Aaj ke Lucky Draw mein koi join nahi hua 😅"); return
-    uid,name=random.choice(people); level=award_bonus_xp(chat_id,uid,name,20)
-    photo=_card_image("LUCKY DRAW WINNER", ["Winner: " + name, "+20 XP"], (20,120,75))
-    caption="🎉 LUCKY DRAW RESULT 🎉\n\n🏆 Winner: " + mention_html(uid,name) + "\n✨ +20 XP mil gaya!"
-    if photo: _send_photo_bytes(chat_id,photo,caption)
-    else: send_message(chat_id,caption,None,"HTML")
-    if level: announce_level_up(chat_id,uid,name,level)
-
-def lucky_scheduler_loop():
-    while True:
-        now=datetime.now(IST)
-        for cid in list(known_chats):
-            if now.hour >= 10 and now.hour < 22: safe_run(post_daily_lucky,cid)
-            elif now.hour >= 22: safe_run(end_daily_lucky,cid)
-        time.sleep(60)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -1397,6 +1365,11 @@ def handle_message(message):
         quoted_context = None
         if reply_to:
             quoted_text = reply_to.get('text') or reply_to.get('caption')
+            if not quoted_text:
+                # Pehle sirf text/caption padha jaata tha - sticker, GIF, voice, video,
+                # document, location, contact, poll jaisi cheezein bilkul ignore ho jaati
+                # thi. Ab inko bhi "read" karke context mein use karte hain.
+                quoted_text = describe_media_for_context(reply_to)
             if quoted_text:
                 quoted_from = reply_to.get('from', {})
                 quoted_name = get_name(quoted_from)
@@ -1722,14 +1695,6 @@ def handle_callback(callback):
     if data_str.startswith("rdl:"):
         safe_run(handle_riddle_press, callback)
         return
-    if data_str.startswith("luckyjoin:"):
-        chat_id = callback['message']['chat']['id']; day=data_str.split(":",1)[1]; user=callback['from']
-        draw=lucky_draws.get(chat_id)
-        if not draw or draw.get("day") != day or draw.get("ended"):
-            safe_run(answer_callback, callback['id'], "Ye Lucky Draw khatam ho chuka hai"); return
-        uid=user.get("id"); name=get_name(user)
-        if uid in draw["participants"]: safe_run(answer_callback, callback['id'], "Tum already join kar chuke ho 🎟️"); return
-        draw["participants"][uid]=name; safe_run(answer_callback, callback['id'], "Lucky Draw join ho gaya! 🎉"); return
 
     if data_str.startswith("modbtn:"):
         parts = data_str.split(":")
@@ -2914,11 +2879,14 @@ def get_ai_reply(user_id, user_text, raw_text=None, quoted_context=None):
             q_name, q_text = quoted_context
             messages_for_ai.append({
                 "role": "system",
-                "content": "[Sirf background context ke liye, isko explain ya describe MAT karna: " + q_name +
-                            " ne pehle ye kaha tha: \"" + trim(q_text, 1000) + "\". Neeche wala message usi ka reply hai. "
-                            "Bas is context ko dhyan mein rakhkar, jaise ek dost ko pura pata hota hai kis baat pe baat ho rahi hai "
-                            "waise hi seedha, natural jawab do - kabhi bhi 'iska matlab tha' ya 'reply ka matlab' jaisa kuch mat bolo, "
-                            "bas normal conversation jaisa jawab do.]"
+                "content": "[ZAROORI: User ne ek PURANE message ko REPLY karke neeche wala naya message bheja hai - "
+                            "dono ko MILAKAR padhna hai, sirf naye message ko alag se mat dekho. Jis message pe reply hua hai, "
+                            "wo " + q_name + " ne kaha tha: \"" + trim(q_text, 1000) + "\". Ab neeche jo user ka naya message "
+                            "aayega, wo isi purane message ke jawab mein/reaction mein hai - pehle samjho purana message kya tha, "
+                            "phir samjho naya message uske context mein kya keh raha hai, phir dono ko jodkar ek SPECIFIC, "
+                            "relevant jawab do - jaise ek dost ko pura pata hota hai kis baat pe baat ho rahi hai. Is quoted "
+                            "message ko 'iska matlab tha' ya 'reply ka matlab' jaisa explain/describe KABHI mat karo - seedha "
+                            "us context ke hisaab se natural jawab do, jaise tumne khud dono messages padhe hain.]"
             })
 
         # sirf jab query ko current/web info chahiye, tabhi alag se search karo
@@ -3271,6 +3239,92 @@ def analyze_photo_with_question(image_bytes, question):
         return None
 
 
+def transcribe_audio(audio_bytes, filename="voice.ogg"):
+    """Voice/audio message ko Groq Whisper se text mein convert karta hai, taaki
+    Khan kisi ke bheje hue voice message ko bhi 'sun' kar reply de sake."""
+    if not GROQ_API_KEY:
+        return None
+    try:
+        headers = {"Authorization": "Bearer " + str(GROQ_API_KEY)}
+        files = {"file": (filename, audio_bytes)}
+        data = {"model": "whisper-large-v3-turbo", "response_format": "text"}
+        r = requests.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers=headers, files=files, data=data, timeout=30
+        )
+        if r.status_code == 200:
+            text = r.text.strip()
+            return text or None
+        print("TRANSCRIBE AUDIO ERROR (status " + str(r.status_code) + "): " + r.text[:300])
+        return None
+    except Exception as e:
+        print("TRANSCRIBE AUDIO EXCEPTION: " + str(e))
+        return None
+
+
+def describe_media_for_context(reply_to):
+    """Jis message ko reply kiya gaya hai usme text/caption na ho (sticker, GIF, voice,
+    video, document, location, contact, poll) to use bhi 'padhkar' ek chhota Hinglish
+    description/transcript banata hai, taaki Khan uska context samjh ke reply de sake -
+    pehle ye sab cheezein bilkul ignore ho jaati thi."""
+    try:
+        if reply_to.get('sticker'):
+            st = reply_to['sticker']
+            emoji = st.get('emoji', '')
+            return "[Sticker bheja tha" + (" (" + emoji + ")" if emoji else "") + "]"
+
+        if reply_to.get('animation'):
+            anim = reply_to['animation']
+            thumb = anim.get('thumb') or anim.get('thumbnail')
+            if thumb and GEMINI_API_KEY:
+                img_bytes = get_telegram_file_bytes(thumb['file_id'])
+                if img_bytes:
+                    desc = analyze_photo_with_question(img_bytes, "Is GIF mein kya ho raha hai, 1 line mein batao")
+                    if desc:
+                        return "[GIF bheja tha jisme: " + desc + "]"
+            return "[Ek GIF bheja tha]"
+
+        if reply_to.get('voice') or reply_to.get('audio'):
+            media = reply_to.get('voice') or reply_to.get('audio')
+            audio_bytes = get_telegram_file_bytes(media['file_id'])
+            if audio_bytes:
+                transcript = transcribe_audio(audio_bytes)
+                if transcript:
+                    return "[Voice message bheja tha, usme bola: \"" + transcript + "\"]"
+            return "[Ek voice message bheja tha]"
+
+        if reply_to.get('video') or reply_to.get('video_note'):
+            media = reply_to.get('video') or reply_to.get('video_note')
+            thumb = media.get('thumb') or media.get('thumbnail')
+            if thumb and GEMINI_API_KEY:
+                img_bytes = get_telegram_file_bytes(thumb['file_id'])
+                if img_bytes:
+                    desc = analyze_photo_with_question(img_bytes, "Is video mein kya dikh raha hai, 1 line mein batao")
+                    if desc:
+                        return "[Video bheja tha jisme: " + desc + "]"
+            return "[Ek video bheja tha]"
+
+        if reply_to.get('document'):
+            doc = reply_to['document']
+            return "[Ek file/document bheja tha: " + (doc.get('file_name') or 'koi file') + "]"
+
+        if reply_to.get('location'):
+            return "[Apni location share ki thi]"
+
+        if reply_to.get('contact'):
+            contact = reply_to['contact']
+            return "[Ek contact share kiya tha: " + (contact.get('first_name') or 'kisi ka number') + "]"
+
+        if reply_to.get('poll'):
+            poll = reply_to['poll']
+            return "[Ek poll banaya tha: \"" + (poll.get('question') or '') + "\"]"
+
+        return None
+    except Exception as e:
+        print("DESCRIBE MEDIA EXCEPTION: " + str(e))
+        return None
+
+
 def generate_tts(text):
     """Bot ki apni reply text ko voice mein convert karta hai (Gemini TTS - Hindi/Hinglish
     natively samajhta hai). Real copyrighted gaano ke lyrics ke liye use nahi hota - sirf
@@ -3339,6 +3393,38 @@ def send_message_with_keyboard(chat_id, text, keyboard, reply_to=None):
         print("SEND KEYBOARD ERROR: " + str(e))
 
 
+def register_bot_commands():
+    """Telegram ke message-box ke '/' command menu mein Khan ke commands dikhane ke
+    liye setMyCommands call karta hai - pehle wahan Khan ka koi command nahi dikhta tha."""
+    commands = [
+        {"command": "help", "description": "Sare commands ki list"},
+        {"command": "rule", "description": "Group ke rules dekho"},
+        {"command": "rank", "description": "Apna XP aur level dekho"},
+        {"command": "leaderboard", "description": "Top active members"},
+        {"command": "setbirthday", "description": "Birthday save karo (DD-MM)"},
+        {"command": "report", "description": "Kisi ki shikayat karo"},
+        {"command": "riddle", "description": "Riddle game start karo (Owner only)"},
+        {"command": "ban", "description": "Member ko ban karo (Admin/Owner)"},
+        {"command": "kick", "description": "Member ko kick karo (Admin/Owner)"},
+        {"command": "unban", "description": "Ban hataao (Admin/Owner)"},
+        {"command": "unbanall", "description": "Sab banned members unban karo (Admin/Owner)"},
+        {"command": "mute", "description": "Member ko mute karo (Admin/Owner)"},
+        {"command": "unmute", "description": "Mute hataao (Admin/Owner)"},
+        {"command": "warn", "description": "Member ko warning do (Admin/Owner)"},
+        {"command": "unwarn", "description": "Warning kam karo (Admin/Owner)"},
+        {"command": "pin", "description": "Message pin karo (Admin/Owner)"},
+    ]
+    try:
+        r = requests.post(TELEGRAM_URL + "/setMyCommands", json={"commands": commands}, timeout=15)
+        data = r.json()
+        if data.get("ok"):
+            print("BOT COMMANDS REGISTERED OK")
+        else:
+            print("BOT COMMANDS REGISTER FAILED: " + str(data))
+    except Exception as e:
+        print("REGISTER BOT COMMANDS EXCEPTION: " + str(e))
+
+
 @app.route('/')
 def home():
     return "Bot is running!"
@@ -3346,6 +3432,6 @@ def home():
 
 if __name__ == '__main__':
     load_state()
-    threading.Thread(target=lucky_scheduler_loop, daemon=True).start()
+    safe_run(register_bot_commands)
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
