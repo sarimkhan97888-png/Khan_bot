@@ -2536,7 +2536,7 @@ def call_gemini(payload, timeout=20, max_retries=1):
     if is_ai_down("gemini"):
         return None, {"error": {"status": "RESOURCE_EXHAUSTED", "message": "gemini temporarily skipped (daily quota cooldown)"}}
 
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     attempt = 0
     while True:
@@ -2666,6 +2666,14 @@ REASONING_LEAK_MARKERS = [
 ]
 
 
+SAFE_TITLE_CASE_PHRASES = {
+    "good morning", "good night", "good evening", "good afternoon",
+    "happy birthday", "welcome back", "thank you", "no problem",
+    "good luck", "take care", "well done", "nice one", "oh no",
+    "oh god", "oh man", "oh bhai", "oh shit", "my bad",
+}
+
+
 def looks_like_leaked_reasoning(text):
     """Kabhi kabhi koi reasoning-wala AI model (jaise Groq ka gpt-oss, ya OpenRouter ka
     auto-picked koi reasoning model) galti se apna poora internal 'sochne ka process'
@@ -2691,6 +2699,21 @@ def looks_like_leaked_reasoning(text):
         return True
     # Kai paragraphs (reasoning mein hote hain, casual chat reply mein nahi)
     if text.count('\n\n') >= 2:
+        return True
+    # Kabhi-kabhi ek reasoning/agentic model apna chhota internal STATUS label hi
+    # "content" ki jagah bhej deta hai - jaise "Refining Option", "Analyzing Input",
+    # "Processing Request" (live group mein aisa ek baar hua: Khan ne "Refining Option"
+    # bhej diya, jo bilkul kisi insaan ka reply nahi lagta). Fingerprint: chhota
+    # (<=40 chars), SIRF Title-Case English words (har word capital letter se shuru),
+    # koi Hindi/Devanagari nahi, koi emoji nahi, koi punctuation nahi (sentence jaisa
+    # nahi lagta) - Khan ka koi genuine Hinglish reply is shape mein kabhi nahi aata.
+    stripped = text.strip()
+    # Kam se kam 2 words zaroori hain - single Title-Case word (jaise "Chal", "Theek",
+    # "Hmm") Khan ke apne genuine short reactions hain (SYSTEM_PROMPT mein khud encourage
+    # kiya gaya hai), unhe false-positive flag nahi karna.
+    if (0 < len(stripped) <= 40
+            and stripped.lower() not in SAFE_TITLE_CASE_PHRASES
+            and re.fullmatch(r'(?:[A-Z][a-z]+)(?:\s[A-Z][a-z]+){1,3}', stripped)):
         return True
     return False
 
@@ -3235,7 +3258,7 @@ def analyze_photo_with_question(image_bytes, question):
     if not GEMINI_API_KEY:
         return None
     try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
         b64_image = base64.b64encode(image_bytes).decode()
         prompt_text = SYSTEM_PROMPT + "\n\nYe image dhyan se dekho, jo bhi usme dikh raha hai (log, cheezein, expressions, text) sab samjho, phir is sawaal/comment ka seedha relevant jawab do: " + question
