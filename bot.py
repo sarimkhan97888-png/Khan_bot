@@ -3475,8 +3475,51 @@ def home():
     return "Bot is running!"
 
 
+def dispatch_update(data):
+    """Ek Telegram update ko sahi handler ke paas bhejta hai (polling mode ke liye;
+    webhook() ka same logic hai)."""
+    if 'callback_query' in data:
+        threading.Thread(target=safe_run, args=(handle_callback, data['callback_query'])).start()
+    elif 'chat_member' in data:
+        threading.Thread(target=safe_run, args=(handle_chat_member_update, data['chat_member'])).start()
+    elif 'message' in data:
+        threading.Thread(target=safe_run, args=(handle_message, data['message'])).start()
+
+
+def polling_loop():
+    """Bina public URL/webhook ke kaam karta hai: Telegram se getUpdates (long polling)
+    karke naye messages khud kheenchta hai."""
+    try:
+        requests.post(TELEGRAM_URL + "/deleteWebhook", json={"drop_pending_updates": False}, timeout=15)
+    except Exception as e:
+        print("DELETE WEBHOOK ERROR: " + str(e))
+    print("POLLING MODE START - koi URL/webhook ki zaroorat nahi")
+    offset = None
+    while True:
+        try:
+            params = {"timeout": 30, "allowed_updates": ["message", "callback_query", "chat_member"]}
+            if offset is not None:
+                params["offset"] = offset
+            r = requests.post(TELEGRAM_URL + "/getUpdates", json=params, timeout=45)
+            data = r.json()
+            if not data.get("ok"):
+                print("GETUPDATES ERROR: " + str(data))
+                time.sleep(5)
+                continue
+            for upd in data.get("result", []):
+                offset = upd["update_id"] + 1
+                print("UPDATE AAYA: " + str(upd))
+                dispatch_update(upd)
+        except Exception as e:
+            print("POLLING ERROR: " + str(e))
+            time.sleep(5)
+
+
 if __name__ == '__main__':
     load_state()
     safe_run(register_bot_commands)
+    # Default: polling (URL nahi chahiye). Webhook chahiye to env USE_WEBHOOK=1 set karo.
+    if os.environ.get("USE_WEBHOOK") != "1":
+        threading.Thread(target=polling_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
