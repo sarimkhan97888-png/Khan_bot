@@ -3503,7 +3503,7 @@ def polling_loop():
             r = requests.post(TELEGRAM_URL + "/getUpdates", json=params, timeout=45)
             data = r.json()
             if not data.get("ok"):
-                print("GETUPDATES ERROR: " + str(data))
+                print("GETUPDATES ERROR (409 = same token pe koi aur instance/webhook chal raha hai): " + str(data))
                 time.sleep(5)
                 continue
             for upd in data.get("result", []):
@@ -3515,11 +3515,41 @@ def polling_loop():
             time.sleep(5)
 
 
-if __name__ == '__main__':
+_started = False
+_start_lock = threading.Lock()
+
+
+def ensure_started():
+    """load_state + command menu + polling ek baar start karta hai. Module import pe bhi
+    chalta hai, isliye gunicorn se chalao ya 'python bot.py' se - dono mein bot jaag jayega
+    (pehle sirf 'python bot.py' pe chalta tha, gunicorn pe bot chup rehta tha)."""
+    global _started
+    with _start_lock:
+        if _started:
+            return
+        _started = True
     load_state()
     safe_run(register_bot_commands)
-    # Default: polling (URL nahi chahiye). Webhook chahiye to env USE_WEBHOOK=1 set karo.
     if os.environ.get("USE_WEBHOOK") != "1":
         threading.Thread(target=polling_loop, daemon=True).start()
+
+
+ensure_started()
+
+
+if __name__ == '__main__':
+    # Render free plan 15 min inactivity pe service sula deta hai (polling bhi ruk jaati hai).
+    # Render apna URL env RENDER_EXTERNAL_URL mein khud deta hai - usi ko har 10 min ping
+    # karte hain taaki service jaagti rahe.
+    ext_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("KEEPALIVE_URL")
+    if ext_url:
+        def _keepalive():
+            while True:
+                time.sleep(600)
+                try:
+                    requests.get(ext_url, timeout=20)
+                except Exception as e:
+                    print("KEEPALIVE ERROR: " + str(e))
+        threading.Thread(target=_keepalive, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, threaded=True)
